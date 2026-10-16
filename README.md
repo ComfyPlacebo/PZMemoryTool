@@ -1,6 +1,6 @@
 # ComfyPlacebo's Project Zomboid Memory Tool
 
-A small open-source Windows tool that sets how much RAM Project Zomboid is allowed to use
+A small open-source Windows tool that checks and sets how much RAM Project Zomboid is allowed to use
 (the `-Xmx` line in `ProjectZomboid64.json`).
 
 ## What it does
@@ -31,19 +31,6 @@ A small open-source Windows tool that sets how much RAM Project Zomboid is allow
 8. **Save** writes the new value. The first save makes `ProjectZomboid64.json.bak` next to the
    original; **Restore backup** puts it back.
 
-## Look and feel
-
-The window follows your Windows settings automatically, and updates live if you change them:
-
-- **Dark / light mode** (Settings > Personalization > Colors > "Choose your app mode"),
-  including a dark title bar on Windows 10 1809+ and Windows 11.
-- **Accent colour** for the Save / Proceed buttons and the tip text (adjusted so it stays readable).
-- **High Contrast** themes: uses your High Contrast colours exactly.
-- **Display scaling** (125%, 150%, 200%...): text and layout stay sharp instead of blurry.
-- **Windows UI font** (Segoe UI on Windows 10/11).
-
-The ComfyPlacebo's banner keeps its own colours. Pop-up message boxes are standard Windows
-message boxes, which Windows itself always shows in light mode.
 
 ## Is it safe?
 
