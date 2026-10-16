@@ -52,16 +52,6 @@ registry settings (it only reads Steam's entries to find the game). It writes on
 `ProjectZomboid64.json` and its `.bak` backup. Because the game folder is under Program Files,
 Windows may ask for administrator permission when you save.
 
-## Building it yourself
-
-Double-click `build.bat`. It uses the C# compiler that already ships with Windows
-(.NET Framework 4.x), so nothing needs to be downloaded. The result is `PZMemoryTool.exe`.
-
-## Changing the rules
-
-The memory tiers, minimum allocation, wait time and default folder are in the `Settings`
-class near the top of `PZMemoryTool.cs`. The banner (logo, colours, star speed) is in the
-`BannerRenderer` class.
 
 Note: Steam's "Verify integrity of game files" or a game update can reset the JSON file;
 just run the tool again.
