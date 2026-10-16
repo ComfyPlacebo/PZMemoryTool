@@ -1,4 +1,4 @@
-# PZ Memory Tool
+# ComfyPlacebo's Project Zomboid Memory Tool
 
 A small open-source Windows tool that sets how much RAM Project Zomboid is allowed to use
 (the `-Xmx` line in `ProjectZomboid64.json`).
