@@ -962,7 +962,9 @@ namespace PZMemoryTool
         static readonly float[] StarSpeed = { 0.18f, 0.45f, 1.1f };  // cells per frame, per layer
 
         static readonly int LogoWidth = MaxLen(Logo);
-        public static readonly int Cols = LogoWidth + 4;
+        public static readonly int Cols = LogoWidth + 4;   // columns at the design width
+        public const int DesignWidth = 560;                 // banner height is based on this width
+        int cols = Cols;                                     // actual columns (wider window = more sky)
 
         readonly SolidBrush[] waveBrushes;   // bright colour wave for the blocks
         readonly Pen[] shadowPens;           // darker version for the shadow lines
@@ -1016,6 +1018,12 @@ namespace PZMemoryTool
             return (int)Math.Round(width / (float)Cols * CellAspect * Rows);
         }
 
+        // Banner height for the current display scaling (same at any window width).
+        public static int ScaledHeight()
+        {
+            return HeightForWidth(Ui.S(DesignWidth));
+        }
+
         // Advance the animation one frame (called ~25 times a second).
         public void Step()
         {
@@ -1025,7 +1033,7 @@ namespace PZMemoryTool
                 sx[i] -= StarSpeed[layer[i]];          // right -> left
                 if (sx[i] < -2)
                 {
-                    sx[i] += Cols + 2;
+                    sx[i] += cols + 2;
                     sy[i] = rnd.Next(Rows);
                 }
             }
@@ -1033,9 +1041,16 @@ namespace PZMemoryTool
 
         public void Render(Graphics g, int width, int height)
         {
-            float cw = width / (float)Cols;
             float ch = height / (float)Rows;
-            int logoLeft = (Cols - LogoWidth) / 2;
+            float cw = ch / CellAspect;                        // keep cell shape: wider banner = more columns
+            int newCols = Math.Max(Cols, (int)Math.Ceiling(width / cw));
+            if (newCols != cols)
+            {
+                for (int i = 0; i < StarCount; i++)            // spread stars over the new width
+                    sx[i] = (float)(rnd.NextDouble() * newCols);
+                cols = newCols;
+            }
+            int logoLeft = (cols - LogoWidth) / 2;
 
             g.SmoothingMode = SmoothingMode.None;
             g.PixelOffsetMode = PixelOffsetMode.Half;
@@ -1049,7 +1064,7 @@ namespace PZMemoryTool
             float barH = 2 * lineW;
 
             // Scrolling colour bars at the very top and bottom edge
-            for (int x = 0; x < Cols; x++)
+            for (int x = 0; x < cols; x++)
             {
                 SolidBrush b = waveBrushes[Mod(x + frame * 2, waveBrushes.Length)];
                 float px = (float)Math.Floor(x * cw);
@@ -1068,7 +1083,7 @@ namespace PZMemoryTool
             for (int i = 0; i < StarCount; i++)
             {
                 int cx = (int)Math.Round(sx[i]);
-                if (cx < 0 || cx >= Cols || !IsSky(cx - logoLeft, sy[i] - LogoTop)) continue;
+                if (cx < 0 || cx >= cols || !IsSky(cx - logoLeft, sy[i] - LogoTop)) continue;
                 string glyph;
                 SolidBrush brush;
                 switch (layer[i])
@@ -1080,7 +1095,7 @@ namespace PZMemoryTool
                         brush = ((frame / 4 + i) % 5 == 0) ? starBrushes[3] : starBrushes[2];
                         // short streak behind the fastest stars
                         for (int k = 1; k <= 2; k++)
-                            if (cx + k < Cols && IsSky(cx + k - logoLeft, sy[i] - LogoTop))
+                            if (cx + k < cols && IsSky(cx + k - logoLeft, sy[i] - LogoTop))
                                 g.DrawString("-", starFont, starBrushes[4], (cx + k) * cw - cw * 0.3f, sy[i] * ch - ch * 0.05f);
                         break;
                 }
@@ -1234,27 +1249,27 @@ namespace PZMemoryTool
         {
             jsonPath = path;
 
-            const int W = 560;   // layout is designed at 100% scaling; Ui.S / Ui.Place scale it
+            const int W = 640;   // layout is designed at 100% scaling; Ui.S / Ui.Place scale it
             Text = "PZ Memory Tool - Project Zomboid RAM allocation";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
 
-            int bannerH = BannerRenderer.HeightForWidth(W);
-            banner.SetBounds(0, 0, Ui.S(W), BannerRenderer.HeightForWidth(Ui.S(W)));
+            int bannerH = BannerRenderer.HeightForWidth(BannerRenderer.DesignWidth);
+            banner.SetBounds(0, 0, Ui.S(W), BannerRenderer.ScaledHeight());
 
             int y = bannerH + 4;
             Label title = new Label();
-            title.Text = "Project Zomboid Memory Allocation Tool";
+            title.Text = "Project Zomboid Memory Allocation Discombobulation Tool";
             title.Font = Ui.Font(14f, FontStyle.Bold);
-            Ui.Place(title, 15, y, 530, 32); y += 38;
+            Ui.Place(title, 15, y, W - 30, 32); y += 38;
 
-            Ui.Place(lblPath, 15, y, 530, 36); lblPath.Tag = "sub";
+            Ui.Place(lblPath, 15, y, W - 30, 36); lblPath.Tag = "sub";
             lblPath.Font = Ui.Font(8.5f); y += 42;
 
-            Ui.Place(lblInstalled, 15, y, 530, 24); lblInstalled.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
-            Ui.Place(lblCurrent, 15, y, 530, 24);   lblCurrent.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
-            Ui.Place(lblRecommend, 15, y, 530, 24); y += 34;
+            Ui.Place(lblInstalled, 15, y, W - 30, 24); lblInstalled.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
+            Ui.Place(lblCurrent, 15, y, W - 30, 24);   lblCurrent.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
+            Ui.Place(lblRecommend, 15, y, W - 30, 24); y += 34;
 
             Label lblNew = new Label();
             lblNew.Text = "New allocation (GB):";
@@ -1268,10 +1283,10 @@ namespace PZMemoryTool
             y += 42;
 
             // Warnings first, then the "try the lower value first" note below them
-            Ui.Place(lblWarning, 15, y, 530, 64);
+            Ui.Place(lblWarning, 15, y, W - 30, 64);
             lblWarning.Tag = "warn";
             y += 66;
-            Ui.Place(lblNote, 15, y, 530, 40);
+            Ui.Place(lblNote, 15, y, W - 30, 40);
             lblNote.Tag = "note";
             lblNote.Font = Ui.Font(10f, FontStyle.Italic);
             y += 44;
@@ -1279,7 +1294,7 @@ namespace PZMemoryTool
             // Ko-fi link, right above the Save button
             lnkKofi.Text = "Support ComfyPlacebo on Ko-fi: ko-fi.com/comfyplacebo";
             lnkKofi.LinkBehavior = LinkBehavior.HoverUnderline;
-            Ui.Place(lnkKofi, 15, y, 530, 24);
+            Ui.Place(lnkKofi, 15, y, W - 30, 24);
             lnkKofi.LinkClicked += delegate { OpenKofi(); };
             y += 30;
 
@@ -1294,7 +1309,7 @@ namespace PZMemoryTool
             btnRestore.Click += delegate { RestoreBackup(); };
 
             btnClose.Text = "Close";
-            Ui.Place(btnClose, 435, y, 110, 34);
+            Ui.Place(btnClose, W - 125, y, 110, 34);
             btnClose.Click += delegate { Close(); };
             y += 34 + 15;
 
