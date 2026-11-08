@@ -1632,9 +1632,9 @@ static void draw_main(void)
     else snprintf(line, sizeof line, "Total installed memory:");
     text_at(F_BIG_B, line, 15, y + 1, T.fg);
     y += 28;
-    if (ui_ready) snprintf(line, sizeof line, "Current allocation (-Xmx / -Xms):   %s / %s",
-                           describe_gb(current_mb, a, sizeof a), current_xms_mb > 0 ? describe_gb(current_xms_mb, b, sizeof b) : "not set");
-    else snprintf(line, sizeof line, "Current allocation (-Xmx / -Xms):");
+    if (ui_ready) snprintf(line, sizeof line, "Current allocation (-Xms / -Xmx):   %s / %s",
+                           current_xms_mb > 0 ? describe_gb(current_xms_mb, b, sizeof b) : "not set", describe_gb(current_mb, a, sizeof a));
+    else snprintf(line, sizeof line, "Current allocation (-Xms / -Xmx):");
     text_at(F_BIG_B, line, 15, y + 1, T.fg);
     y += 28;
     const char *device = mi.kind == HW_STEAM_DECK ? "Steam Deck" : mi.kind == HW_STEAM_MACHINE ? "Steam Machine" : "PC";

@@ -2022,8 +2022,9 @@ namespace PZMemoryTool
             lblPath.Text = "File Found: " + jsonPath;
             lblInstalled.Text = "Total installed memory:   " + installedWholeGB + " GB" +
                                 (usableMB > 0 ? "   (" + (usableMB / 1024.0).ToString("0.0") + " GB usable)" : "");
-            lblCurrent.Text   = "Current allocation (-Xmx / -Xms):   " + XmxParser.Describe(currentMB) + " / " +
-                                (currentXmsMB > 0 ? XmxParser.Describe(currentXmsMB) : "not set");
+            lblCurrent.Text   = "Current allocation (-Xms / -Xmx):   " +
+                                (currentXmsMB > 0 ? XmxParser.Describe(currentXmsMB) : "not set") + " / " +
+                                XmxParser.Describe(currentMB);
             lblRecommend.Text = "Recommended allocation for this PC (-Xmx):   " + recommendText;
 
             cboGB.Items.Clear();
