@@ -1,102 +1,293 @@
 # ComfyPlacebo's Project Zomboid Memory Tool
 
-A small open-source Windows tool that checks and sets how much RAM Project Zomboid is
-allowed to use (the `-Xmx` maximum and `-Xms` minimum settings in `ProjectZomboid64.json`), and
-copies the game's `console.txt` log to your clipboard.
+A small open-source tool that checks and sets how much RAM Project Zomboid is allowed to use
+(the `-Xmx` maximum and `-Xms` minimum settings in `ProjectZomboid64.json`), clears memory
+settings from Steam's launch options, and copies the game's `console.txt` log to your clipboard.
 
-**Version 1.1.0**
+**This is the `preview` branch: version 1.1.0-preview**, for testing before 1.2.0.
+
+| | Windows | Linux / SteamOS (Steam Deck, Steam Machine, Linux PCs) |
+|---|---|---|
+| Download | [Actions](../../actions/workflows/preview.yml) > newest run > **Artifacts** | [Releases > v1.1.0-preview](../../releases/tag/v1.1.0-preview) (pre-release) |
+| File | `PZMemoryTool.exe` | `PZMemoryTool-1.1.0-preview-linux-steamos.tar.gz` or the bare `PZMemoryTool-linux-steamos` |
+| Source | `PZMemoryTool.cs` (one file) | `linux/src/` (four short C files) |
+
+The finished Windows version is [v1.1.0](../../releases/tag/v1.1.0). Both preview downloads are
+built by GitHub from the source in this branch (see [How the downloads are built](#how-the-downloads-are-built)).
+
+**Contents:** [What it does](#what-it-does) ·
+[Windows](#windows) · [Linux / SteamOS](#linux--steamos) · [Steam Deck](#steam-deck) ·
+[Memory rules](#memory-rules) · [Steam Deck memory, explained](#steam-deck-memory-explained) ·
+[Is it safe?](#is-it-safe) · [Building it yourself](#building-it-yourself)
+
+---
 
 ## What it does
 
-1. **Finds the game.** Looks for `ProjectZomboid64.json` in
-   `C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid`. If it isn't there, it asks
-   Steam where the game is installed (Steam's registry entries, all your Steam library folders and
-   Project Zomboid's app manifest). Only if that fails too, it offers to search your drives or let
-   you pick the file. It checks the file really is Project Zomboid's before using it.
-2. **Shows your memory.** Total installed RAM, the current `-Xmx` / `-Xms`, and a recommendation
-   for your PC.
+1. **Finds the game.** Looks in Steam's default folder, then asks Steam where Project Zomboid is
+   installed (all your Steam library folders and Project Zomboid's app manifest). Only if that
+   fails, it offers to search your drives or let you pick the file. It checks the file really is
+   Project Zomboid's before using it.
+2. **Shows your memory.** Total installed RAM and how much of it the system can use, the current
+   `-Xmx` / `-Xms`, and a recommendation for your PC.
 3. **Checks Steam's launch options.** Memory settings typed into Steam's launch options for Project
-   Zomboid override the game file. The tool shows them as
-   "Steam Memory Allocation Launch Option" (signed-in Steam account only).
+   Zomboid override the game file. The tool shows them as "Steam Memory Allocation Launch Option"
+   (signed-in Steam account only).
 4. **Lets you choose:**
-   - **Maximum allocation (-Xmx)** from the dropdown, within the rules below.
+   - **Maximum allocation (-Xmx)** from the dropdown, within the [rules](#memory-rules).
    - **Minimum allocation (-Xms)**: tick the box and pick a value (4 GB up to 1 GB less than the
      maximum), or untick it to save no `-Xms` at all.
 5. **Saves.** Writes `-Xms` (if ticked) just before `-Xmx` in the game file and clears any
    `-Xmx` / `-Xms` from Steam's launch options, so only the game file's settings are used.
    The file is read back afterwards to confirm the change.
-6. **Console Copier.** The **Copy Console** button copies `console.txt` (from your `Zomboid`
-   folder) to the clipboard as a file. Paste it into Discord, a message or a folder with
-   right click or Ctrl+V. Works while the game is running.
-7. **Refresh.** The circular-arrow button at the top right re-reads the game file, Steam's launch
-   options and your memory, keeping your current choices.
+6. **Console Copier.** **Copy Console** copies `console.txt` to the clipboard as a file (paste it
+   into Discord, a message or a folder). **Copy as text** copies its contents as text (paste it
+   anywhere you can type). Works while the game is running.
+7. **Refresh.** The circular-arrow button at the top right re-reads everything, keeping your
+   current choices.
 
-### Memory rules
+**Project Zomboid and Steam must be closed to save.** The tool opens normally while the game is
+running, so you can check your allocation or copy the console log mid-game. **Save** and
+**Restore backup** ask you to close Project Zomboid first. If Steam's launch options contain memory
+settings, Steam must also be fully closed (otherwise Steam writes them back): the tool offers
+**Close Steam for me**, **Proceed** (after closing it yourself) or **Skip** (save the game file only).
 
-| Installed RAM | Maximum (-Xmx) choices | Minimum (-Xms) | Warnings / notes |
+**Backups.** The first save makes `ProjectZomboid64.json.bak` next to the game file. Before changing
+Steam's launch options, Steam's settings file is backed up to `localconfig.vdf.pzmemorytool.bak`.
+**Restore backup** puts back the original game file and Project Zomboid's original Steam launch
+options (only those; your other Steam settings are left as they are).
+
+Steam's "Verify integrity of game files" or a game update can reset the game file; just run the tool again.
+
+---
+
+## Windows
+
+**What's new in 1.1.0-preview:** "Copy as text" button; installed memory shown with the amount
+Windows can use ("32 GB (31.7 GB usable)"); new upper limits on 16 GB and up (see [rules](#memory-rules)).
+
+### Download and run
+
+1. Open [Actions > Preview builds](../../actions/workflows/preview.yml), click the newest run with a
+   green tick, scroll to **Artifacts** and download `PZMemoryTool-1.1.0-preview-…-windows`
+   (you need to be signed in to GitHub). It's a .zip: extract it.
+2. Your browser may warn about the download, because the program is new and not digitally signed:
+   - **Edge:** "…isn't commonly downloaded" > hover over it > **⋯** > **Keep** > **Show more** > **Keep anyway**.
+   - **Chrome:** "Suspicious download" > **Keep** (or **Download suspicious file**).
+   - **Firefox:** usually no warning; if there is one, choose **Allow download**.
+3. Double-click `PZMemoryTool.exe`. If Windows shows **"Windows protected your PC"** (SmartScreen),
+   click **More info** > **Run anyway**. This appears for programs that aren't signed with a paid
+   certificate; it doesn't mean anything was found. Building it yourself (below) avoids it.
+4. Because the game folder is under Program Files, Windows may ask for administrator permission
+   when you save.
+
+`SHA256.txt` in the download lets you check the file matches the build on GitHub.
+
+**Look and feel:** the window follows your Windows settings automatically, and updates live if you
+change them: dark / light mode, accent colour, High Contrast themes, display scaling and the Windows
+UI font.
+
+---
+
+## Linux / SteamOS
+
+One program file, no installer, nothing else to install. It runs natively (no Proton / Wine) on
+SteamOS (Steam Deck, Steam Machine) and on other Linux PCs (64-bit, X11 or Wayland). It looks like
+your desktop: it uses your KDE / SteamOS colours (Vapor on SteamOS, Breeze otherwise) and the system
+font (Noto Sans), and works with mouse, touch, keyboard and controller.
+
+### Download and run
+
+1. Open [Releases > v1.1.0-preview](../../releases/tag/v1.1.0-preview) and download **one** of:
+   - `PZMemoryTool-1.1.0-preview-linux-steamos.tar.gz` (recommended). In Dolphin (the file manager
+     in Desktop Mode): right-click it > **Extract** > **Extract archive here**. Open the new
+     `PZMemoryTool` folder. The program inside is ready to run.
+   - `PZMemoryTool-linux-steamos` (the bare program file). Downloads lose their "can run"
+     permission, so first: right-click it > **Properties** > **Permissions** > tick
+     **Allow executing file as program** (called **Is executable** in older versions) > **OK**.
+     In a terminal: `chmod +x PZMemoryTool-linux-steamos`.
+2. Double-click the program. Dolphin may ask what to do with an executable file: choose **Execute**.
+3. Your browser usually doesn't warn about Linux downloads. If it does, choose **Keep** / **Allow download**.
+
+`SHA256.txt` on the release page lets you check the files (`sha256sum -c SHA256.txt`).
+
+**Where it writes on Linux:** the game file and its `.bak`; Steam's `localconfig.vdf` (only Project
+Zomboid's launch options, only if they contain `-Xmx` / `-Xms`) and its backup;
+`~/.config/PZMemoryTool/settings.ini` (one line: your "Add to Steam" answer); a copy of
+`console.txt` in `~/.cache/PZMemoryTool/` when you use Copy Console; and, only for the Game Mode
+"Fix it for me" step, a temporary autostart entry that removes itself.
+
+### Controls
+
+| | Controller | Keyboard | Mouse / touch |
 |---|---|---|---|
-| 32 GB or more | 5 GB up to RAM − 2 GB, recommended 8–12 GB | ticked, 4 GB by default | Above 10 GB: "for advanced users" |
-| 16 GB – under 32 GB | 5 GB up to RAM − 2 GB, recommended 8 GB | ticked, 4 GB by default | Above 8 GB: "not recommended" |
-| 12 GB – under 16 GB | 6 GB or 8 GB only | ticked, 4 GB by default | Consider upgrading to 16 GB; try 6 GB first, then 8 GB |
-| 8 GB – under 12 GB | 5 GB or 6 GB only | locked off (no `-Xms`) | Not recommended for heavily modded servers, upgrade to 16 GB; try 5 GB first, then 6 GB |
-| under 8 GB | locked (only Close and Copy Console work) | – | Not advised for heavily modded servers |
+| Move between controls | D-pad or left stick, L1 / R1 | Arrow keys, Tab | — |
+| Press | **A** | Enter or Space | Click / tap |
+| Back (close a list or dialog) | **B** | Escape | Click outside |
+| Change a dropdown value | D-pad left / right | Left / Right | Tap the dropdown |
 
-You can never choose a maximum below 5 GB or above your installed RAM minus 2 GB, and the minimum
-is always at least 1 GB below the maximum (Java won't start if `-Xms` is larger than `-Xmx`).
+The clipboard keeps working after you close the tool: a tiny background copy of it hands the console
+log over when you paste, and quits as soon as you copy something else.
 
-### Project Zomboid and Steam must be closed to save
+---
 
-The tool opens normally while the game is running, so you can check your allocation or copy the
-console log mid-game. **Save** and **Restore backup** ask you to close Project Zomboid first.
-If Steam's launch options contain memory settings, Steam must also be fully closed (otherwise Steam
-writes them back): the tool offers **Close Steam for me**, **Proceed** (after closing it yourself)
-or **Skip** (save the game file only).
+## Steam Deck
 
-### Backups
+### Desktop Mode (recommended for the first run)
 
-- The first save makes `ProjectZomboid64.json.bak` next to the game file.
-- Before changing Steam's launch options, the tool backs up Steam's settings file to
-  `localconfig.vdf.pzmemorytool.bak`.
-- **Restore backup** puts back the original game file and Project Zomboid's original Steam launch
-  options (only those; your other Steam settings are left as they are).
+Press the **Steam** button > **Power** > **Switch to Desktop**. Download and start the tool as above.
+On the first run it asks:
+
+> **Add PZ Memory Tool to Steam?** Then you can open it from your Steam Library, also in Game Mode,
+> and use your controller in it.  — **Yes** / **Not now** / **Don't ask again**
+
+**Yes** adds it to your Library under **Non-Steam**. If you move the file later, add it again.
+In Desktop Mode the Deck's controls act as a mouse (trackpad / touch) and keyboard unless the tool
+is started from Steam; touch always works.
+
+### Game Mode
+
+Open **Library** > **Non-Steam** > **PZ Memory Tool**. Everything works with the controller and touch.
+
+Steam can't be closed in Game Mode, so if Steam's launch options for Project Zomboid contain memory
+settings, **Save** offers:
+
+- **Fix it for me**: saves the game file, switches to Desktop Mode, closes Steam there, clears the
+  launch options, and switches back to Game Mode by itself (about a minute). In Desktop Mode you see
+  a short message with **Return to Game Mode** / **Stay in Desktop Mode** (it returns by itself after 10 s).
+- **I'll clear it myself**: saves the game file; then select Project Zomboid in your Library >
+  gear icon (**Settings**) > **Properties** > **General** > **Launch Options**, and delete the
+  `-Xmx…` / `-Xms…` parts.
+- **Skip**: saves the game file only.
+
+### Docked
+
+Docked works like Desktop Mode or Game Mode, whichever you're in. Graphics on an external screen
+use more of the shared memory, which is why the tool suggests 8–9 GB rather than 10 GB when docked
+(see below).
+
+---
+
+## Memory rules
+
+"Installed" is your total RAM; the tool rounds what the system reports up to a standard size.
+
+### Windows
+
+| Installed RAM | Maximum (-Xmx) choices | Recommended | Minimum (-Xms) | Warnings / notes |
+|---|---|---|---|---|
+| 32 GB or more | 5 GB up to RAM − 6 GB (Windows 10) or RAM − 7 GB (Windows 11) | 8–12 GB | ticked, 4 GB | Above 10 GB: "for advanced users" |
+| 16 GB – under 32 GB | 5 GB up to RAM − 6 GB (Win 10) / RAM − 7 GB (Win 11) | 8 GB | ticked, 4 GB | Above 8 GB: "not recommended" |
+| 12 GB – under 16 GB | 6 GB or 8 GB only | 6 GB | ticked, 4 GB | Consider upgrading to 16 GB; try 6 GB first, then 8 GB |
+| 8 GB – under 12 GB | 5 GB or 6 GB only | 5 GB | locked off | Not recommended for heavily modded servers; try 5 GB first, then 6 GB |
+| under 8 GB | locked (only Close and the Console Copier work) | – | – | Not advised for heavily modded servers |
+
+Examples: 16 GB on Windows 10 → up to 10 GB; on Windows 11 → up to 9 GB. 32 GB → up to 26 / 25 GB.
+The extra headroom on 16 GB and up is for Windows itself, Java's own memory outside the `-Xmx`
+limit, and everything else running.
+
+### Linux PCs
+
+Same as Windows, with the 16 GB-and-up limit at RAM − 6 GB.
+
+### Steam Machine
+
+16 GB: 8, 9 or 10 GB, recommended 8 GB. Upgraded to more than 16 GB: the normal tiers above, but
+never below 8 GB and up to RAM − 6 GB. Minimum (-Xms) as normal.
+
+### Steam Deck
+
+The Deck's 16 GB is shared between the system and graphics, so the choices depend on how much your
+Deck sets aside for graphics: the **UMA Frame Buffer Size** (the memory your Steam Deck sets aside
+for graphics, a BIOS setting; "UMA buffer" below). No minimum (-Xms) is used on the Deck.
+
+| UMA buffer | Maximum (-Xmx) choices | Recommended | Note |
+|---|---|---|---|
+| 1 GB (default) | 8, 9, 10 GB | 8 GB | At 9–10 GB: "Graphics share this memory. In Desktop Mode or docked, 8–9 GB is safer. If you notice stutter, go back to 8." |
+| 2 GB | 8, 9 GB | 8 GB | Same note at 9 GB |
+| 3 GB | 7, 8 GB | 8 GB | Project Zomboid doesn't need a 3 GB UMA buffer; at 1 GB the game has more memory. 8 GB still works. |
+| 4 GB or more | 6, 7, 8 GB | 7 GB | Project Zomboid doesn't need that much; setting it back to 1 GB gives 3 GB back to the game. At 8 GB: warning (see below). |
+
+At 8 GB with a 4 GB UMA buffer, the tool shows a shorter version of this warning: *"At 8 GB, only about 0.5 GB of memory is left for
+everything else on your Deck. The game may stutter or freeze. Choose 7 GB, or lower the UMA buffer to 1–2 GB."*
+
+## Steam Deck memory, explained
+
+How the numbers above are worked out, so you can check them:
+
+| | UMA 1 GB | UMA 2 GB | UMA 3 GB | UMA 4 GB |
+|---|---|---|---|---|
+| Installed | 16 GB | 16 GB | 16 GB | 16 GB |
+| − UMA buffer (graphics) | 1 GB | 2 GB | 3 GB | 4 GB |
+| − firmware / kernel reserve | ~0.5 GB | ~0.5 GB | ~0.5 GB | ~0.5 GB |
+| = usable (what the tool shows) | ~14.5 GB | ~13.5 GB | ~12.5 GB | ~11.5 GB |
+| − SteamOS + Steam in Game Mode | ~2 GB | ~2 GB | ~2 GB | ~2 GB |
+| − Java's own memory outside `-Xmx` | ~1 GB | ~1 GB | ~1 GB | ~1 GB |
+| = room for `-Xmx` + spare | ~11.5 GB | ~10.5 GB | ~9.5 GB | ~8.5 GB |
+| Spare at 8 GB | ~3.5 GB | ~2.5 GB | ~1.5 GB | **~0.5 GB** |
+| Highest choice (spare) | 10 GB (~1.5 GB) | 9 GB (~1.5 GB) | 8 GB (~1.5 GB) | 8 GB (~0.5 GB, warned) |
+
+Desktop Mode (KDE Plasma) uses roughly 1 GB more than Game Mode (on a test Deck in Desktop Mode,
+docked, `free -h` showed 14 GiB total and 3.4 GiB used before starting the game). That's why 8–9 GB
+is suggested there. SteamOS also has about 8 GB of compressed swap in memory (zram), which softens
+short peaks but is slow, so the tool doesn't count on it. You can check your own numbers in
+Desktop Mode with `free -h` in Konsole, and your UMA buffer with
+`cat /sys/class/drm/card*/device/mem_info_vram_total` (1073741824 = 1 GB).
+
+### Changing the UMA Frame Buffer Size (BIOS)
+
+1. Shut the Deck down completely.
+2. Hold **Volume Up** and press **Power**; release when you hear the chime. The boot menu opens.
+3. Choose **Setup Utility** > **Advanced** > **UMA Frame Buffer Size**.
+4. Set it to **1G** (the default; Project Zomboid doesn't need more) and choose **Exit** > **Save Changes and Exit**.
+
+Some other games ask for a larger UMA buffer; if you keep it at 3–4 GB for them, the tool adjusts
+its choices for you.
+
+---
 
 ## Is it safe?
 
-All the code is in one file, `PZMemoryTool.cs`, which anyone can read. The tool:
+All the code is in this repository and anyone can read it. The tool makes no network connections
+(the Ko-fi link only opens your browser when you click it) and writes only the files listed above.
+On Windows it reads (never changes) Steam's install location, the signed-in Steam account and your
+colour settings from the registry.
 
-- makes no network connections (the Ko-fi link only opens your web browser when you click it),
-- reads, but never changes, Windows registry entries (Steam's install location and signed-in
-  account, and your dark/light mode and accent colour),
-- writes only: `ProjectZomboid64.json` and its `.bak` backup; Project Zomboid's launch options in
-  Steam's `localconfig.vdf` (only if they contain `-Xmx` / `-Xms`) and its backup; and a copy of
-  `console.txt` in your Temp folder when you use Copy Console.
+## How the downloads are built
 
-Because the game folder is under Program Files, Windows may ask for administrator permission when
-you save. Windows SmartScreen may warn about the downloaded .exe because it isn't digitally signed;
-building it yourself (below) avoids that.
+Both preview downloads are built by GitHub Actions ([`.github/workflows/preview.yml`](.github/workflows/preview.yml))
+on every push to this branch, from the source you see here. Nothing is uploaded by hand.
+
+- **Windows:** compiled with the C# compiler built into Windows (same command as `build.bat`). Version
+  1.1.0.*N* where *N* is the run number; product version 1.1.0-preview. Available under **Artifacts**
+  on the run's page only (not on the Releases page).
+- **Linux / SteamOS:** compiled on Ubuntu 22.04 with raylib 5.5 built in, then published as the
+  pre-release **v1.1.0-preview**, replacing the previous preview build. `PZMemoryTool --version`
+  shows the build number.
 
 ## Building it yourself
 
-Double-click `build.bat`. It uses the C# compiler that already ships with Windows
-(.NET Framework 4.x), so nothing needs to be downloaded. It embeds `PZMemoryTool.manifest`
-(a short plain-text file telling Windows the tool runs with normal user rights and supports
-Windows 10/11). The result is `PZMemoryTool.exe`.
+**Windows:** double-click `build.bat`. It uses the C# compiler that ships with Windows (.NET
+Framework 4.x), so nothing needs to be downloaded, and embeds `PZMemoryTool.manifest` (tells Windows
+the tool runs with normal user rights). A self-built exe doesn't trigger SmartScreen on your own PC.
 
-## Look and feel
+**Linux:** install a C compiler and the X11 / OpenGL development files, then run `sh linux/build.sh`.
+It downloads raylib 5.5 once, builds it into the program, and leaves `linux/PZMemoryTool`
+(about 1 MB).
 
-The window follows your Windows settings automatically, and updates live if you change them:
-dark / light mode (including the title bar), accent colour, High Contrast themes, display scaling
-(125%, 150%, 200%…) and the Windows UI font. The ComfyPlacebo's banner keeps its own colours.
-Pop-up message boxes are standard Windows message boxes, which Windows always shows in light mode.
+```sh
+# Debian / Ubuntu
+sudo apt install build-essential git libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libgl1-mesa-dev
+# Arch (or SteamOS after "sudo steamos-readonly disable")
+sudo pacman -S base-devel git libx11 libxrandr libxinerama libxcursor libxi mesa
+sh linux/build.sh
+```
 
 ## Changing the rules
 
-The memory tiers, minimum/maximum limits, wait times and default folder are in the `Settings`
-class near the top of `PZMemoryTool.cs`. The banner (logo, colours, star speed) is in the
-`BannerRenderer` class.
-
-Note: Steam's "Verify integrity of game files" or a game update can reset the game file;
-just run the tool again.
+Windows: the `Settings` class near the top of `PZMemoryTool.cs` (tiers, limits, wait times); the
+banner is in `BannerRenderer`. Linux: the settings at the top of `linux/src/pzmt.h` and
+`make_plan()` / `plan_messages()` in `linux/src/core.c`; the banner is in `linux/src/banner.c`.
 
 ## Support
 

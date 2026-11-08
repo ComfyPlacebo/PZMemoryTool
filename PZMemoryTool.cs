@@ -36,7 +36,7 @@ using System.Reflection;
 [assembly: AssemblyCopyright("Copyright (c) 2026 ComfyPlacebo")]
 [assembly: AssemblyVersion("1.1.0.0")]
 [assembly: AssemblyFileVersion("1.1.0.0")]
-[assembly: AssemblyInformationalVersion("1.1.0")]
+[assembly: AssemblyInformationalVersion("1.1.0-preview")]
 
 namespace PZMemoryTool
 {
@@ -70,7 +70,7 @@ namespace PZMemoryTool
     // -------------------------------------------------------------------------
     static class Settings
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.1.0-preview";
         public const string DefaultFolder =
             @"C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid";
         public const string JsonName = "ProjectZomboid64.json";
@@ -82,7 +82,9 @@ namespace PZMemoryTool
         public const int DefaultXmsGB      = 4;  // -Xms (minimum / starting memory) selected by default
         public const int MinXmsGB          = 4;  // lowest -Xms offered; the highest is the selected -Xmx minus 1 GB
                                                  // (8 GB systems never get -Xms: the option is locked off there)
-        public const int WindowsReserveGB  = 2;  // always leave this much for Windows
+        public const int WindowsReserveGB  = 2;  // 8 GB / 12 GB tiers: their fixed choices must fit in installed RAM minus this
+        public const int Win10ReserveGB    = 6;  // 16 GB and up: highest maximum = installed RAM minus 6 GB on Windows 10
+        public const int Win11ReserveGB    = 7;  // 16 GB and up: highest maximum = installed RAM minus 7 GB on Windows 11
         public const int RecommendedUpgrade = 16;
         public const int GameCheckWaitSeconds = 5;
         public const int SteamCloseWaitSeconds = 30;  // how long "Close Steam for me" waits for Steam to exit
@@ -1325,10 +1327,32 @@ namespace PZMemoryTool
             }
             catch { }
 
+            return UsableMB();
+        }
+
+        // RAM Windows can actually use (installed minus what the hardware reserves).
+        public static long UsableMB()
+        {
             MEMORYSTATUSEX s = new MEMORYSTATUSEX();
             if (GlobalMemoryStatusEx(s))
                 return (long)(s.ullTotalPhys / (1024 * 1024));
             return 0;
+        }
+
+        // Windows 11 is build 22000 or later (both report version 10.0).
+        public static bool IsWindows11()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string b = k == null ? null : k.GetValue("CurrentBuildNumber") as string;
+                    int build;
+                    if (b != null && int.TryParse(b, out build)) return build >= 22000;
+                }
+            }
+            catch { }
+            return Environment.OSVersion.Version.Build >= 22000;
         }
     }
 
@@ -1731,6 +1755,7 @@ namespace PZMemoryTool
         Label lblConsoleInfo = new Label();
         Label lblConsoleStatus = new Label();
         Button btnCopyConsole = new Button();
+        Button btnCopyText = new Button();
 
         // -Xms to save: the selected minimum when the box is ticked, otherwise none (0).
         // 8 GB systems: the box is locked off, so always none.
@@ -1751,7 +1776,7 @@ namespace PZMemoryTool
             const int W = 640;   // layout is designed at 100% scaling; Ui.S / Ui.Place scale it
             const int LeftW = 410;   // width of the left column (the Console Copier box is on the right)
             int BoxX = 435;          // Console Copier box; moved right if "Use recommended" needs the room
-            const int BoxH = 272;
+            const int BoxH = 314;
             Text = "PZ Memory Tool v" + Settings.Version + " - Now with Console copier!!";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
@@ -1852,19 +1877,22 @@ namespace PZMemoryTool
             boxConsole.Title = "Console Copier";
             boxConsole.TitleFont = MonoFont(10f, FontStyle.Bold);
             Ui.Place(lblConsoleInfo, 14, 30, boxW - 28, 122);
-            lblConsoleInfo.Text = "Copies Project Zomboid's console.txt log file to your clipboard.\n\n" +
+            lblConsoleInfo.Text = "Copies Project Zomboid's console.txt log to your clipboard, as a file or as text.\n\n" +
                                   "Paste it into Discord, a message or a folder with right click or Ctrl+V.";
             lblConsoleInfo.Font = Ui.Font(9f);
             lblConsoleInfo.TextAlign = ContentAlignment.TopCenter;
-            Ui.Place(lblConsoleStatus, 10, boxH - 112, boxW - 20, 54);
+            Ui.Place(lblConsoleStatus, 10, boxH - 154, boxW - 20, 54);
             lblConsoleStatus.Tag = "note";
             lblConsoleStatus.Font = Ui.Font(8.5f);
             lblConsoleStatus.TextAlign = ContentAlignment.BottomCenter;
             btnCopyConsole.Text = "Copy Console";
             int copyW = Math.Min(130, boxW - 24);
-            Ui.Place(btnCopyConsole, (boxW - copyW) / 2, boxH - 52, copyW, 34);
-            btnCopyConsole.Click += delegate { CopyConsole(); };
-            boxConsole.Controls.AddRange(new Control[] { lblConsoleInfo, lblConsoleStatus, btnCopyConsole });
+            Ui.Place(btnCopyConsole, (boxW - copyW) / 2, boxH - 94, copyW, 34);
+            btnCopyConsole.Click += delegate { CopyConsole(false); };
+            btnCopyText.Text = "Copy as text";
+            Ui.Place(btnCopyText, (boxW - copyW) / 2, boxH - 52, copyW, 34);
+            btnCopyText.Click += delegate { CopyConsole(true); };
+            boxConsole.Controls.AddRange(new Control[] { lblConsoleInfo, lblConsoleStatus, btnCopyConsole, btnCopyText });
 
             btnSave.Text = "Save";
             btnSave.Tag = "primary";
@@ -1952,13 +1980,16 @@ namespace PZMemoryTool
             Match xms = XmxParser.FindXms(text);
             currentXmsMB = xms == null ? 0 : XmxParser.ToMB(xms);
             installedMB = SystemMemory.InstalledMB();
+            long usableMB = SystemMemory.UsableMB();
             CheckSteamLaunchOptions();
 
             double installedGB = installedMB / 1024.0;
             int installedWholeGB = (int)Math.Round(installedGB);
 
             // Never more than installed RAM minus 2 GB, never less than 5 GB
-            int maxGB = installedWholeGB - Settings.WindowsReserveGB;
+            int maxGB = installedWholeGB - Settings.WindowsReserveGB;   // 8 GB / 12 GB tiers (fixed choices)
+            // 16 GB and up: leave about 2 GB of headroom on top of Windows and Java's own needs
+            int capGB = installedWholeGB - (SystemMemory.IsWindows11() ? Settings.Win11ReserveGB : Settings.Win10ReserveGB);
 
             List<int> options = new List<int>();
             string recommendText;
@@ -1966,12 +1997,12 @@ namespace PZMemoryTool
             if (installedWholeGB >= Settings.Tier32)
             {
                 tier = 32; recommendedGB = 8; recommendText = "8 to 12 GB";
-                for (int gb = Settings.MinAllocGB; gb <= maxGB; gb++) options.Add(gb);
+                for (int gb = Settings.MinAllocGB; gb <= capGB; gb++) options.Add(gb);
             }
             else if (installedWholeGB >= Settings.Tier16)
             {
                 tier = 16; recommendedGB = 8; recommendText = "8 GB";
-                for (int gb = Settings.MinAllocGB; gb <= maxGB; gb++) options.Add(gb);
+                for (int gb = Settings.MinAllocGB; gb <= capGB; gb++) options.Add(gb);
             }
             else if (installedWholeGB >= Settings.Tier12)
             {
@@ -1989,7 +2020,8 @@ namespace PZMemoryTool
             }
 
             lblPath.Text = "File Found: " + jsonPath;
-            lblInstalled.Text = "Total installed memory:   " + installedGB.ToString("0.#") + " GB";
+            lblInstalled.Text = "Total installed memory:   " + installedWholeGB + " GB" +
+                                (usableMB > 0 ? "   (" + (usableMB / 1024.0).ToString("0.0") + " GB usable)" : "");
             lblCurrent.Text   = "Current allocation (-Xmx / -Xms):   " + XmxParser.Describe(currentMB) + " / " +
                                 (currentXmsMB > 0 ? XmxParser.Describe(currentXmsMB) : "not set");
             lblRecommend.Text = "Recommended allocation for this PC (-Xmx):   " + recommendText;
@@ -2194,9 +2226,9 @@ namespace PZMemoryTool
             return r;
         }
 
-        // Copies console.txt to the clipboard as a file (paste into Discord or a folder with Ctrl+V).
+        // Copies console.txt to the clipboard as a file (asText = false) or as its text (asText = true).
         // A snapshot is copied to a temp folder first, so the game can keep writing its log.
-        void CopyConsole()
+        void CopyConsole(bool asText)
         {
             string console = Path.Combine(Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Zomboid"), "console.txt");
@@ -2215,12 +2247,17 @@ namespace PZMemoryTool
                 using (FileStream dst = new FileStream(copy, FileMode.Create, FileAccess.Write))
                     src.CopyTo(dst);
 
-                System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
-                files.Add(copy);
-                Clipboard.SetFileDropList(files);
+                if (asText)
+                    Clipboard.SetText(File.ReadAllText(copy));
+                else
+                {
+                    System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
+                    files.Add(copy);
+                    Clipboard.SetFileDropList(files);
+                }
 
                 long kb = new FileInfo(copy).Length / 1024;
-                lblConsoleStatus.Text = "Copied console.txt\n(" + (kb >= 1024 ? (kb / 1024.0).ToString("0.0") + " MB" : kb + " KB") +
+                lblConsoleStatus.Text = (asText ? "Copied console.txt as text\n(" : "Copied console.txt\n(") + (kb >= 1024 ? (kb / 1024.0).ToString("0.0") + " MB" : kb + " KB") +
                                         ", " + File.GetLastWriteTime(console).ToString("t") + ")";
             }
             catch (Exception ex)
