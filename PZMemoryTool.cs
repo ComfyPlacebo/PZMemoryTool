@@ -5,9 +5,11 @@
 //  Open source - single file, no network access (the Ko-fi link only opens
 //  your web browser when you click it), no installer, no registry
 //  changes (it only READS Steam's registry entries to find the game, and the
-//  Windows dark/light mode and accent colour settings to match them). The only
-//  file it writes is ProjectZomboid64.json (after making a .bak backup copy
-//  next to it).
+//  Windows dark/light mode and accent colour settings to match them). It
+//  writes ProjectZomboid64.json (after making a .bak backup copy next to it)
+//  and, only if they contain -Xmx / -Xms, Steam's launch options for Project
+//  Zomboid in localconfig.vdf (also backed up first). The Console Copier
+//  puts a copy of console.txt in your Temp folder so it can go on the clipboard.
 //
 //  Build: run build.bat on any Windows 10/11 PC (uses the C# compiler that
 //  ships with Windows / .NET Framework 4.x).
@@ -24,6 +26,17 @@ using System.Text.RegularExpressions;
 using System.Threading;
 using System.Windows.Forms;
 using Microsoft.Win32;
+using System.Reflection;
+
+// File details shown in Windows (right-click the .exe > Properties > Details)
+[assembly: AssemblyTitle("PZ Memory Tool")]
+[assembly: AssemblyDescription("Sets Project Zomboid's memory allocation (-Xmx / -Xms) and copies console.txt. Open source.")]
+[assembly: AssemblyCompany("ComfyPlacebo")]
+[assembly: AssemblyProduct("PZ Memory Tool")]
+[assembly: AssemblyCopyright("Copyright (c) 2026 ComfyPlacebo")]
+[assembly: AssemblyVersion("1.1.0.0")]
+[assembly: AssemblyFileVersion("1.1.0.0")]
+[assembly: AssemblyInformationalVersion("1.1.0")]
 
 namespace PZMemoryTool
 {
@@ -36,9 +49,8 @@ namespace PZMemoryTool
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
 
-            // Project Zomboid must not be running while we read/change its settings.
-            if (!ProcessGuard.EnsureGameClosed())
-                return; // user cancelled
+            // The tool opens even while Project Zomboid is running (to check the allocation or
+            // use the Console Copier). Save and Restore ask for the game to be closed first.
 
             // When relaunched as administrator we receive the file path as an argument.
             string path = (args.Length > 0 && File.Exists(args[0])) ? args[0] : null;
@@ -58,16 +70,22 @@ namespace PZMemoryTool
     // -------------------------------------------------------------------------
     static class Settings
     {
+        public const string Version = "1.1.0";
         public const string DefaultFolder =
             @"C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid";
         public const string JsonName = "ProjectZomboid64.json";
         public const string GameProcessName = "ProjectZomboid64"; // ProjectZomboid64.exe
+        public const string SteamProcessName = "steam";           // steam.exe
         public const string SteamAppId = "108600";                // Project Zomboid on Steam
 
         public const int MinAllocGB        = 5;  // never allow less than this
+        public const int DefaultXmsGB      = 4;  // -Xms (minimum / starting memory) selected by default
+        public const int MinXmsGB          = 4;  // lowest -Xms offered; the highest is the selected -Xmx minus 1 GB
+                                                 // (8 GB systems never get -Xms: the option is locked off there)
         public const int WindowsReserveGB  = 2;  // always leave this much for Windows
         public const int RecommendedUpgrade = 16;
         public const int GameCheckWaitSeconds = 5;
+        public const int SteamCloseWaitSeconds = 30;  // how long "Close Steam for me" waits for Steam to exit
         public const string KofiUrl = "https://ko-fi.com/comfyplacebo";
 
         // Memory tiers (installed RAM, in GB)
@@ -429,7 +447,10 @@ namespace PZMemoryTool
     }
 
     // -------------------------------------------------------------------------
-    //  Make sure ProjectZomboid64.exe is not running
+    //  Make sure a program (Project Zomboid or Steam) is not running.
+    //  Ask the user to close it and click Proceed; after Proceed check again,
+    //  wait 5 seconds and check once more, then keep asking until it is closed
+    //  or the user cancels / skips.
     // -------------------------------------------------------------------------
     class ProcessGuard : ThemedForm
     {
@@ -438,48 +459,94 @@ namespace PZMemoryTool
         Button btnCancel = new Button();
         System.Windows.Forms.Timer waitTimer = new System.Windows.Forms.Timer();
         int secondsLeft;
+        readonly string processName, displayName, askText;
 
-        const string AskText =
-            "Project Zomboid (ProjectZomboid64.exe) is currently running.\n\n" +
-            "Please close Project Zomboid, then click Proceed.";
-
-        public static bool IsGameRunning()
+        public static bool IsRunning(string processName)
         {
-            Process[] procs = Process.GetProcessesByName(Settings.GameProcessName);
+            Process[] procs = Process.GetProcessesByName(processName);
             bool running = procs.Length > 0;
             foreach (Process p in procs) p.Dispose();
             return running;
         }
 
+        public static bool IsGameRunning() { return IsRunning(Settings.GameProcessName); }
+
         // Returns true when the game is closed, false if the user cancelled.
         public static bool EnsureGameClosed()
         {
-            if (!IsGameRunning())
+            return EnsureClosed(Settings.GameProcessName, "Project Zomboid",
+                "Project Zomboid (ProjectZomboid64.exe) is currently running.\n\n" +
+                "Please close Project Zomboid, then click Proceed.", "Cancel");
+        }
+
+        // Returns true when Steam is closed, false if the user chose to skip.
+        // reason: what the tool wants to do to the launch options, e.g. "remove the memory settings from".
+        public static bool EnsureSteamClosed(string reason, string skipMeans)
+        {
+            return EnsureClosed(Settings.SteamProcessName, "Steam",
+                "Steam is running. To " + reason + " Project Zomboid's Steam launch options, " +
+                "Steam must be fully closed first, otherwise Steam puts the old settings back.\n\n" +
+                "Click \"Close Steam for me\", or close Steam yourself (Steam > Exit) and click Proceed. " +
+                "Click Skip to " + skipMeans + ".", "Skip", true);
+        }
+
+        static bool EnsureClosed(string processName, string displayName, string askText, string cancelText)
+        {
+            return EnsureClosed(processName, displayName, askText, cancelText, false);
+        }
+
+        static bool EnsureClosed(string processName, string displayName, string askText, string cancelText, bool offerCloseSteam)
+        {
+            if (!IsRunning(processName))
                 return true;
-            using (ProcessGuard f = new ProcessGuard())
+            using (ProcessGuard f = new ProcessGuard(processName, displayName, askText, cancelText, offerCloseSteam))
                 return f.ShowDialog() == DialogResult.OK;
         }
 
-        ProcessGuard()
+        Button btnCloseSteam;
+        System.Windows.Forms.Timer closeTimer;
+        int closeSecondsLeft;
+
+        ProcessGuard(string processName, string displayName, string askText, string cancelText, bool offerCloseSteam)
         {
-            Text = "PZ Memory Tool - Project Zomboid is running";
+            this.processName = processName;
+            this.displayName = displayName;
+            this.askText = askText;
+
+            Text = "PZ Memory Tool - " + displayName + " is running";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false; MinimizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
             TopMost = true;
-            ClientSize = new Size(Ui.S(440), Ui.S(150));
+            int h = offerCloseSteam ? 200 : 170;
+            int by = h - 45;
+            ClientSize = new Size(Ui.S(440), Ui.S(h));
 
-            Ui.Place(message, 15, 15, 410, 80);
-            message.Text = AskText;
+            Ui.Place(message, 15, 15, 410, by - 25);
+            message.Text = askText;
+
+            if (offerCloseSteam)
+            {
+                btnCloseSteam = new Button();
+                btnCloseSteam.Text = "Close Steam for me";
+                btnCloseSteam.Tag = "primary";
+                Ui.Place(btnCloseSteam, 15, by, 160, 32);
+                btnCloseSteam.Click += delegate { CloseSteamForMe(); };
+                Controls.Add(btnCloseSteam);
+
+                closeTimer = new System.Windows.Forms.Timer();
+                closeTimer.Interval = 1000;
+                closeTimer.Tick += delegate { OnCloseTick(); };
+            }
 
             btnProceed.Text = "Proceed";
-            btnProceed.Tag = "primary";
-            Ui.Place(btnProceed, 225, 105, 95, 32);
+            if (!offerCloseSteam) btnProceed.Tag = "primary";
+            Ui.Place(btnProceed, 225, by, 95, 32);
             btnProceed.Click += delegate { OnProceed(); };
 
-            btnCancel.Text = "Cancel";
-            Ui.Place(btnCancel, 330, 105, 95, 32);
-            btnCancel.Click += delegate { waitTimer.Stop(); DialogResult = DialogResult.Cancel; };
+            btnCancel.Text = cancelText;
+            Ui.Place(btnCancel, 330, by, 95, 32);
+            btnCancel.Click += delegate { waitTimer.Stop(); if (closeTimer != null) closeTimer.Stop(); DialogResult = DialogResult.Cancel; };
 
             waitTimer.Interval = 1000;
             waitTimer.Tick += delegate { OnWaitTick(); };
@@ -494,7 +561,7 @@ namespace PZMemoryTool
         void OnProceed()
         {
             // First check: right after the user clicks Proceed
-            if (!IsGameRunning()) { DialogResult = DialogResult.OK; return; }
+            if (!IsRunning(processName)) { DialogResult = DialogResult.OK; return; }
 
             // Still running: wait 5 seconds, then check again
             btnProceed.Enabled = false;
@@ -511,22 +578,58 @@ namespace PZMemoryTool
             waitTimer.Stop();
 
             // Second check
-            if (!IsGameRunning()) { DialogResult = DialogResult.OK; return; }
+            if (!IsRunning(processName)) { DialogResult = DialogResult.OK; return; }
 
             // Still running: ask again (loops until closed or cancelled)
-            message.Text = "Project Zomboid is still running.\n\n" + AskText;
+            message.Text = displayName + " is still running.\n\n" + askText;
             btnProceed.Enabled = true;
         }
 
         void ShowCountdown()
         {
-            message.Text = "Project Zomboid is still running.\n\nChecking again in " + secondsLeft +
+            message.Text = displayName + " is still running.\n\nChecking again in " + secondsLeft +
                            " second" + (secondsLeft == 1 ? "" : "s") + "...";
+        }
+
+        // Asks Steam to shut down normally (same as Steam > Exit), then waits for it to finish.
+        void CloseSteamForMe()
+        {
+            btnCloseSteam.Enabled = false;
+            btnProceed.Enabled = false;
+            waitTimer.Stop();
+            SteamLaunchOptions.RequestSteamShutdown();
+            closeSecondsLeft = Settings.SteamCloseWaitSeconds;
+            message.Text = "Closing Steam...\n\nWaiting for Steam to finish closing. This can take a few seconds.";
+            closeTimer.Start();
+        }
+
+        void OnCloseTick()
+        {
+            if (!IsRunning(processName))
+            {
+                closeTimer.Stop();
+                message.Text = "Steam is closed.";
+                Thread.Sleep(1000);   // give Steam a moment to finish writing its settings
+                DialogResult = DialogResult.OK;
+                return;
+            }
+            closeSecondsLeft--;
+            if (closeSecondsLeft > 0)
+            {
+                message.Text = "Closing Steam...\n\nWaiting for Steam to finish closing (" + closeSecondsLeft + "s).";
+                return;
+            }
+            closeTimer.Stop();
+            message.Text = "Steam is taking a long time to close.\n\n" +
+                           "Close it from the Steam icon in the taskbar tray (right-click > Exit), then click Proceed. " +
+                           "Or click \"Close Steam for me\" to try again.";
+            btnCloseSteam.Enabled = true;
+            btnProceed.Enabled = true;
         }
 
         protected override void Dispose(bool disposing)
         {
-            if (disposing) waitTimer.Dispose();
+            if (disposing) { waitTimer.Dispose(); if (closeTimer != null) closeTimer.Dispose(); }
             base.Dispose(disposing);
         }
     }
@@ -678,7 +781,7 @@ namespace PZMemoryTool
             return null;
         }
 
-        static List<string> SteamRoots()
+        public static List<string> SteamRoots()
         {
             List<string> roots = new List<string>();
             AddRegistryPath(roots, Registry.CurrentUser,  @"Software\Valve\Steam", "SteamPath");
@@ -860,12 +963,17 @@ namespace PZMemoryTool
     }
 
     // -------------------------------------------------------------------------
-    //  Reading / writing the -Xmx argument
+    //  Reading / writing the -Xmx (maximum) and -Xms (minimum) arguments in
+    //  ProjectZomboid64.json
     // -------------------------------------------------------------------------
     static class XmxParser
     {
         // Matches e.g. -Xmx3072m, -Xmx8g, -Xmx8G
         static readonly Regex XmxRegex = new Regex(@"-Xmx(\d+)([kKmMgG]?)");
+        static readonly Regex XmsRegex = new Regex(@"-Xms(\d+)([kKmMgG]?)");
+        // The quoted "-Xmx..." / "-Xms..." entries in the vmArgs list
+        static readonly Regex XmxEntryRegex = new Regex(@"""-Xmx\d+[kKmMgG]?""");
+        static readonly Regex XmsEntryRegex = new Regex(@"""-Xms\d+[kKmMgG]?""");
 
         // Returns the regex match for the -Xmx argument, or null.
         public static Match Find(string text)
@@ -874,7 +982,14 @@ namespace PZMemoryTool
             return m.Success ? m : null;
         }
 
-        // Converts the -Xmx value to megabytes.
+        // Returns the regex match for the -Xms argument, or null.
+        public static Match FindXms(string text)
+        {
+            Match m = XmsRegex.Match(text);
+            return m.Success ? m : null;
+        }
+
+        // Converts an -Xmx / -Xms value to megabytes.
         public static long ToMB(Match m)
         {
             long n = long.Parse(m.Groups[1].Value);
@@ -887,10 +1002,293 @@ namespace PZMemoryTool
             }
         }
 
-        // Replaces only the -Xmx argument, leaving the rest of the file untouched.
-        public static string Replace(string text, int newGB)
+        // The whole "-Xms..." entry line in the vmArgs list (with its comma, if any)
+        static readonly Regex XmsLineRegex = new Regex(@"(?m)^[ \t]*""-Xms\d+[kKmMgG]?""[ \t]*(,?)[ \t]*\r?\n");
+
+        // Sets -Xmx (maximum) and -Xms (minimum), leaving the rest of the file untouched.
+        // -Xms is always written directly BEFORE -Xmx: on its own line if -Xmx is on its
+        // own line, otherwise on the same line (", "). An existing -Xms is moved there.
+        // xmsGB = 0 means no -Xms at all: any existing -Xms entry is removed.
+        public static string SetMemory(string text, int xmxGB, int xmsGB)
         {
-            return XmxRegex.Replace(text, "-Xmx" + (newGB * 1024) + "m", 1);
+            string xmx = "-Xmx" + (xmxGB * 1024) + "m";
+            text = RemoveXms(XmxRegex.Replace(text, xmx, 1));
+            if (xmsGB <= 0)
+                return text;
+            string xms = "-Xms" + (xmsGB * 1024) + "m";
+
+            Match entry = XmxEntryRegex.Match(text);
+            if (!entry.Success)
+                return text;   // -Xmx not in quotes: can't safely add -Xms (Save reports it)
+
+            // Is "-Xmx..." alone on its line? Then put -Xms on the line above with the same indentation.
+            int lineStart = entry.Index == 0 ? 0 : text.LastIndexOf('\n', entry.Index - 1) + 1;
+            string indent = text.Substring(lineStart, entry.Index - lineStart);
+            bool ownLine = indent.Trim().Length == 0;
+            string newline = text.Contains("\r\n") ? "\r\n" : "\n";
+            string between = ownLine ? "," + newline + indent : ", ";
+
+            return text.Substring(0, entry.Index) + "\"" + xms + "\"" + between + text.Substring(entry.Index);
+        }
+
+        // Removes the -Xms entry from the vmArgs list, keeping the list valid JSON.
+        static string RemoveXms(string text)
+        {
+            Match m = XmsLineRegex.Match(text);
+            if (!m.Success)
+            {
+                // -Xms shares a line with other entries: remove it and one neighbouring comma
+                Match e = XmsEntryRegex.Match(text);
+                if (!e.Success) return text;
+                Match commaAfter = new Regex(@"\G[ \t]*,[ \t]*").Match(text, e.Index + e.Length);
+                if (commaAfter.Success)
+                    return text.Substring(0, e.Index) + text.Substring(commaAfter.Index + commaAfter.Length);
+                Match commaBefore = new Regex(@",[ \t]*$").Match(text.Substring(0, e.Index));
+                if (commaBefore.Success)
+                    return text.Substring(0, commaBefore.Index) + text.Substring(e.Index + e.Length);
+                return text.Substring(0, e.Index) + text.Substring(e.Index + e.Length);
+            }
+            string before = text.Substring(0, m.Index), after = text.Substring(m.Index + m.Length);
+            if (m.Groups[1].Value.Length == 0)
+            {
+                // -Xms was the last entry: drop the comma after the entry before it
+                int c = before.TrimEnd(' ', '\t', '\r', '\n').Length - 1;
+                if (c >= 0 && before[c] == ',') before = before.Remove(c, 1);
+            }
+            return before + after;
+        }
+
+        public static string Describe(long mb)
+        {
+            return (mb / 1024.0).ToString("0.#") + " GB";
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    //  Steam launch options for Project Zomboid
+    //  Steam keeps them per Steam account in
+    //  <Steam>\userdata\<account>\config\localconfig.vdf under
+    //  Software > Valve > Steam > apps > 108600 > "LaunchOptions".
+    //  Launch options override ProjectZomboid64.json, so any -Xmx / -Xms there
+    //  would undo this tool's setting.
+    // -------------------------------------------------------------------------
+    class LaunchOptionsEntry
+    {
+        public string ConfigFile;   // the localconfig.vdf it came from
+        public string Value;        // the launch options text, as stored
+        public int ValueStart;      // where the text sits in the file
+        public int ValueLength;
+    }
+
+    static class SteamLaunchOptions
+    {
+        static readonly Regex MemArgRegex = new Regex(@"(?<!\S)-Xm[xs]\d+[kKmMgG]?(?!\S)");
+
+        // The localconfig.vdf of the Steam account that is signed in (or was signed in last).
+        // Only that account is checked and changed. Empty list if it can't be found.
+        public static List<string> ConfigFiles()
+        {
+            List<string> files = new List<string>();
+            long account = CurrentAccountId();
+            if (account <= 0) return files;
+            foreach (string root in SteamLocator.SteamRoots())
+            {
+                string f = Path.Combine(Path.Combine(Path.Combine(Path.Combine(root, "userdata"),
+                               account.ToString()), "config"), "localconfig.vdf");
+                if (File.Exists(f) && !files.Contains(f)) { files.Add(f); break; }
+            }
+            return files;
+        }
+
+        // Steam account number (the folder name under userdata).
+        // 1) the account Steam reports as signed in right now, 2) the most recent sign-in.
+        public static long CurrentAccountId()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam\ActiveProcess"))
+                {
+                    object v = k == null ? null : k.GetValue("ActiveUser");
+                    if (v is int && (int)v != 0) return (long)(uint)(int)v;
+                }
+            }
+            catch { }
+
+            foreach (string root in SteamLocator.SteamRoots())
+            {
+                try
+                {
+                    string f = Path.Combine(Path.Combine(root, "config"), "loginusers.vdf");
+                    if (!File.Exists(f)) continue;
+                    foreach (Match m in Regex.Matches(File.ReadAllText(f), "\"(\\d{17})\"\\s*\\{([^}]*)\\}"))
+                    {
+                        if (Regex.IsMatch(m.Groups[2].Value, "\"MostRecent\"\\s+\"1\"", RegexOptions.IgnoreCase))
+                            return long.Parse(m.Groups[1].Value) - 76561197960265728L;
+                    }
+                }
+                catch { }
+            }
+            return 0;
+        }
+
+        // Asks Steam to close normally (like Steam > Exit).
+        public static void RequestSteamShutdown()
+        {
+            foreach (string root in SteamLocator.SteamRoots())
+            {
+                string exe = Path.Combine(root, "steam.exe");
+                if (!File.Exists(exe)) continue;
+                try { Process.Start(exe, "-shutdown"); return; } catch { }
+            }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("steam://exit");
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch { }
+        }
+
+        public static string BackupPath(string configFile) { return configFile + ".pzmemorytool.bak"; }
+
+        // The launch options as they were before this tool changed them (null if no backup).
+        public static string BackedUpValue(string configFile)
+        {
+            try
+            {
+                string b = BackupPath(configFile);
+                if (!File.Exists(b)) return null;
+                LaunchOptionsEntry e = Locate(File.ReadAllText(b));
+                return e == null ? null : e.Value;
+            }
+            catch { return null; }
+        }
+
+        // The launch options right now ("" if Project Zomboid has none set).
+        public static string CurrentValue(string configFile)
+        {
+            try
+            {
+                LaunchOptionsEntry e = Locate(File.ReadAllText(configFile));
+                return e == null ? "" : e.Value;
+            }
+            catch { return ""; }
+        }
+
+        // Puts back only Project Zomboid's launch options from the backup.
+        // Every other Steam setting is left as it is now. Returns true if changed.
+        public static bool RestoreFromBackup(string configFile)
+        {
+            string old = BackedUpValue(configFile);
+            if (old == null) return false;
+            string text = File.ReadAllText(configFile);
+            LaunchOptionsEntry e = Locate(text);
+            if (e == null || e.Value == old) return false;
+            File.WriteAllText(configFile, text.Substring(0, e.ValueStart) + old + text.Substring(e.ValueStart + e.ValueLength));
+            return true;
+        }
+
+        // Project Zomboid's launch options in every account that has some.
+        public static List<LaunchOptionsEntry> FindAll()
+        {
+            List<LaunchOptionsEntry> list = new List<LaunchOptionsEntry>();
+            foreach (string f in ConfigFiles())
+            {
+                try
+                {
+                    LaunchOptionsEntry e = Locate(File.ReadAllText(f));
+                    if (e != null) { e.ConfigFile = f; list.Add(e); }
+                }
+                catch { }
+            }
+            return list;
+        }
+
+        // Just the -Xmx / -Xms parts, e.g. "-Xmx6g -Xms2g" ("" if none).
+        public static string MemoryArgs(string launchOptions)
+        {
+            List<string> found = new List<string>();
+            foreach (Match m in MemArgRegex.Matches(launchOptions)) found.Add(m.Value);
+            return string.Join(" ", found.ToArray());
+        }
+
+        // Launch options with -Xmx / -Xms taken out, everything else kept.
+        public static string WithoutMemoryArgs(string launchOptions)
+        {
+            string s = MemArgRegex.Replace(launchOptions, "");
+            s = Regex.Replace(s, @"\s+", " ").Trim();
+            if (s == "--") s = "";   // only the "end of Java options" marker was left
+            return s;
+        }
+
+        // Removes -Xmx / -Xms from one account's launch options. Makes a backup of
+        // localconfig.vdf first. Returns the backup path.
+        public static string RemoveMemoryArgs(string configFile)
+        {
+            string text = File.ReadAllText(configFile);       // re-read: Steam may have rewritten it
+            LaunchOptionsEntry e = Locate(text);
+            if (e == null || MemoryArgs(e.Value).Length == 0) return null;
+
+            string backup = BackupPath(configFile);
+            if (!File.Exists(backup) || MemoryArgs(BackedUpValue(configFile) ?? "").Length == 0)
+                File.Copy(configFile, backup, true);   // keep the copy that still has the user's original options
+
+            string updated = text.Substring(0, e.ValueStart) + WithoutMemoryArgs(e.Value) +
+                             text.Substring(e.ValueStart + e.ValueLength);
+            File.WriteAllText(configFile, updated);
+            return backup;
+        }
+
+        // Finds Project Zomboid's "LaunchOptions" value in localconfig.vdf text.
+        // A small reader for Steam's KeyValues format: "key" "value" and "key" { ... }.
+        static LaunchOptionsEntry Locate(string text)
+        {
+            List<string> path = new List<string>();
+            string pendingKey = null;
+            int i = 0, n = text.Length;
+            while (i < n)
+            {
+                char c = text[i];
+                if (char.IsWhiteSpace(c)) { i++; continue; }
+                if (c == '/' && i + 1 < n && text[i + 1] == '/')
+                {
+                    while (i < n && text[i] != '\n') i++;
+                    continue;
+                }
+                if (c == '{') { path.Add(pendingKey ?? ""); pendingKey = null; i++; continue; }
+                if (c == '}') { if (path.Count > 0) path.RemoveAt(path.Count - 1); pendingKey = null; i++; continue; }
+                if (c == '"')
+                {
+                    int start = ++i;
+                    while (i < n && text[i] != '"') { if (text[i] == '\\') i++; i++; }
+                    int len = Math.Min(i, n) - start;
+                    i++;
+                    if (pendingKey == null) { pendingKey = text.Substring(start, len); continue; }
+
+                    // This string is the value for pendingKey
+                    if (string.Equals(pendingKey, "LaunchOptions", StringComparison.OrdinalIgnoreCase) && IsZomboidApp(path))
+                    {
+                        LaunchOptionsEntry e = new LaunchOptionsEntry();
+                        e.ValueStart = start; e.ValueLength = len;
+                        e.Value = text.Substring(start, len);
+                        return e;
+                    }
+                    pendingKey = null;
+                    continue;
+                }
+                i++; // anything else (unquoted text) is ignored
+            }
+            return null;
+        }
+
+        static bool IsZomboidApp(List<string> path)
+        {
+            string[] want = { "Software", "Valve", "Steam", "apps", Settings.SteamAppId };
+            if (path.Count < want.Length) return false;
+            int off = path.Count - want.Length;
+            for (int k = 0; k < want.Length; k++)
+                if (!string.Equals(path[off + k], want[k], StringComparison.OrdinalIgnoreCase)) return false;
+            return true;
         }
     }
 
@@ -1222,20 +1620,104 @@ namespace PZMemoryTool
     }
 
     // -------------------------------------------------------------------------
+    //  Dropdown entry that shows "8 GB" but holds the number 8
+    // -------------------------------------------------------------------------
+    class GbItem
+    {
+        public readonly int GB;
+        public GbItem(int gb) { GB = gb; }
+        public override string ToString() { return GB + " GB"; }
+    }
+
+    // -------------------------------------------------------------------------
+    //  Small square button with a circular-arrow "refresh" icon
+    // -------------------------------------------------------------------------
+    class RefreshButton : Button
+    {
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            float size = Math.Min(Width, Height) * 0.48f;
+            float cx = Width / 2f, cy = Height / 2f;
+            RectangleF arc = new RectangleF(cx - size / 2, cy - size / 2, size, size);
+            Color c = Enabled ? ForeColor : SystemColors.GrayText;
+            float w = Math.Max(1.6f, Width / 15f);
+            using (Pen p = new Pen(c, w))
+                g.DrawArc(p, arc, -60, 300);          // open circle, gap at the top right
+            // arrow head at the end of the arc (pointing clockwise)
+            double a = -60 * Math.PI / 180;
+            float ex = cx + (float)(Math.Cos(a) * size / 2), ey = cy + (float)(Math.Sin(a) * size / 2);
+            float h = size * 0.42f;
+            PointF[] head = {
+                new PointF(ex + h * 0.55f, ey - h * 0.05f),
+                new PointF(ex - h * 0.45f, ey - h * 0.55f),
+                new PointF(ex - h * 0.15f, ey + h * 0.55f)
+            };
+            using (SolidBrush b = new SolidBrush(c)) g.FillPolygon(b, head);
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    //  Bordered box with a title in the border (used for "Console Copier")
+    // -------------------------------------------------------------------------
+    class TitledBox : Panel
+    {
+        public string Title = "";
+        public Font TitleFont;
+
+        public TitledBox()
+        {
+            SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint |
+                     ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            base.OnPaint(e);
+            Graphics g = e.Graphics;
+            Font f = TitleFont ?? Font;
+            Size ts = TextRenderer.MeasureText(g, Title, f, Size.Empty, TextFormatFlags.NoPadding);
+            int line = Math.Max(2, Ui.S(2));
+            int top = ts.Height / 2;
+            int half = line / 2;
+            using (Pen p = new Pen(ForeColor, line))
+            {
+                Rectangle r = new Rectangle(half, top, Width - line, Height - top - line + half);
+                g.DrawRectangle(p, r);
+            }
+            // gap in the top border for the title
+            int tx = (Width - ts.Width) / 2;
+            using (SolidBrush b = new SolidBrush(BackColor))
+                g.FillRectangle(b, tx - Ui.S(6), 0, ts.Width + Ui.S(12), ts.Height);
+            TextRenderer.DrawText(g, Title, f, new Point(tx, 0), ForeColor, TextFormatFlags.NoPadding);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     //  Main window
     // -------------------------------------------------------------------------
     class MainForm : ThemedForm
     {
         readonly string jsonPath;
-        long installedMB, currentMB;
+        long installedMB, currentMB, currentXmsMB;   // currentXmsMB = 0 when -Xms is not set
         int recommendedGB;
         int tier;          // 32, 16, 12, 8, or 0 (under 8 GB)
+        List<LaunchOptionsEntry> steamEntries = new List<LaunchOptionsEntry>();  // PZ launch options with -Xmx / -Xms
+        bool steamChecked;                                                        // found the signed-in account's settings
 
         Banner banner = new Banner();
         Label lblPath = new Label();
+        Label lblSteam = new Label();
+        Label lblSteamNote = new Label();
         Label lblInstalled = new Label();
         Label lblCurrent = new Label();
         Label lblRecommend = new Label();
+        CheckBox chkXms = new CheckBox();
+        ComboBox cboXms = new ComboBox();
+        RefreshButton btnRefresh = new RefreshButton();
+        ToolTip tips = new ToolTip();
         Label lblWarning = new Label();
         Label lblNote = new Label();
         ComboBox cboGB = new ComboBox();
@@ -1245,12 +1727,32 @@ namespace PZMemoryTool
         Button btnRestore = new Button();
         Button btnClose = new Button();
 
+        TitledBox boxConsole = new TitledBox();
+        Label lblConsoleInfo = new Label();
+        Label lblConsoleStatus = new Label();
+        Button btnCopyConsole = new Button();
+
+        // -Xms to save: the selected minimum when the box is ticked, otherwise none (0).
+        // 8 GB systems: the box is locked off, so always none.
+        int XmsGB
+        {
+            get
+            {
+                if (tier == 8 || !chkXms.Enabled || !chkXms.Checked) return 0;
+                GbItem it = cboXms.SelectedItem as GbItem;
+                return it == null ? 0 : it.GB;
+            }
+        }
+
         public MainForm(string path)
         {
             jsonPath = path;
 
             const int W = 640;   // layout is designed at 100% scaling; Ui.S / Ui.Place scale it
-            Text = "PZ Memory Tool - Project Zomboid RAM allocation";
+            const int LeftW = 410;   // width of the left column (the Console Copier box is on the right)
+            int BoxX = 435;          // Console Copier box; moved right if "Use recommended" needs the room
+            const int BoxH = 272;
+            Text = "PZ Memory Tool v" + Settings.Version + " - Now with Console copier!!";
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1262,31 +1764,74 @@ namespace PZMemoryTool
             Label title = new Label();
             title.Text = "Project Zomboid Memory Allocation Discombobulation Tool";
             title.Font = Ui.Font(14f, FontStyle.Bold);
-            Ui.Place(title, 15, y, W - 30, 32); y += 38;
+            Ui.Place(title, 15, y, W - 30 - 40, 32);
+
+            // Refresh button: end of the title line, top-right corner of the window below the banner
+            Ui.Place(btnRefresh, W - 15 - 30, y + 1, 30, 30);
+            tips.SetToolTip(btnRefresh, "Refresh: re-check the game file, Steam launch options and memory");
+            btnRefresh.Click += delegate { RefreshValues(); };
+            y += 38;
 
             Ui.Place(lblPath, 15, y, W - 30, 36); lblPath.Tag = "sub";
-            lblPath.Font = Ui.Font(8.5f); y += 42;
+            lblPath.Font = Ui.Font(8.5f); y += 38;
 
-            Ui.Place(lblInstalled, 15, y, W - 30, 24); lblInstalled.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
-            Ui.Place(lblCurrent, 15, y, W - 30, 24);   lblCurrent.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
-            Ui.Place(lblRecommend, 15, y, W - 30, 24); y += 34;
+            // Steam launch options report, right under the file that was found
+            Ui.Place(lblSteam, 15, y, W - 30, 22);
+            lblSteam.Font = Ui.Font(9.5f, FontStyle.Bold); y += 22;
+            Ui.Place(lblSteamNote, 15, y, W - 30, 20);
+            lblSteamNote.Font = Ui.Font(8.5f); y += 28;
 
+            Ui.Place(lblInstalled, 15, y, LeftW, 24); lblInstalled.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
+            int regionTop = y;       // the Console Copier box is centred beside this line ... 
+            Ui.Place(lblCurrent, 15, y, LeftW + 10, 24); lblCurrent.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
+            Ui.Place(lblRecommend, 15, y, LeftW + 10, 24); y += 26;
+            y += 8;
+
+            // Minimum (-Xms): tick box + dropdown (4 GB up to the selected maximum minus 1 GB).
+            // The dropdowns and button are placed after measuring the text, so nothing gets cut off.
+            chkXms.Text = "Minimum allocation (-Xms):";
+            const string MaxText = "Maximum allocation (-Xmx):";
+            int ComboX = 15 + Math.Max(Unscaled(TextRenderer.MeasureText(chkXms.Text, Font).Width) + 22,
+                                       Unscaled(TextRenderer.MeasureText(MaxText, Font).Width)) + 10;
+            int btnW = Unscaled(TextRenderer.MeasureText("Use recommended", Font).Width) + 26;
+            Ui.Place(chkXms, 15, y + 1, ComboX - 17, 26);
+            chkXms.CheckedChanged += delegate { cboXms.Enabled = chkXms.Enabled && chkXms.Checked; };
+            cboXms.DropDownStyle = ComboBoxStyle.DropDownList;
+            Ui.Place(cboXms, ComboX, y, 85, 28);
+            y += 36;
+
+            // Maximum (-Xmx)
             Label lblNew = new Label();
-            lblNew.Text = "New allocation (GB):";
-            Ui.Place(lblNew, 15, y + 3, 150, 24);
+            lblNew.Text = MaxText;
+            Ui.Place(lblNew, 15, y + 3, ComboX - 17, 24);
             cboGB.DropDownStyle = ComboBoxStyle.DropDownList;
-            Ui.Place(cboGB, 170, y, 80, 28);
-            cboGB.SelectedIndexChanged += delegate { UpdateWarning(); };
+            Ui.Place(cboGB, ComboX, y, 85, 28);
+            cboGB.SelectedIndexChanged += delegate { UpdateXmsOptions(); UpdateWarning(); };
             btnRecommended.Text = "Use recommended";
-            Ui.Place(btnRecommended, 265, y - 1, 150, 30);
             btnRecommended.Click += delegate { SelectGB(recommendedGB); };
-            y += 42;
+            // "Use recommended" sits beside the dropdown if it fits without squeezing the
+            // Console Copier box (box no further right than MaxBoxX); otherwise on its own line below.
+            const int MaxBoxX = 455;
+            bool buttonBelow = ComboX + 93 + btnW + 15 > MaxBoxX;
+            int leftRight;
+            if (!buttonBelow)
+            {
+                Ui.Place(btnRecommended, ComboX + 93, y - 1, btnW, 30);
+                leftRight = ComboX + 93 + btnW;
+                y += 44;
+            }
+            else
+            {
+                Ui.Place(btnRecommended, ComboX, y + 36, btnW, 30);
+                leftRight = ComboX + 85;
+                y += 36 + 42;
+            }
 
             // Warnings first, then the "try the lower value first" note below them
-            Ui.Place(lblWarning, 15, y, W - 30, 64);
+            Ui.Place(lblWarning, 15, y, LeftW, 80);
             lblWarning.Tag = "warn";
-            y += 66;
-            Ui.Place(lblNote, 15, y, W - 30, 40);
+            y += 82;
+            Ui.Place(lblNote, 15, y, LeftW, 40);
             lblNote.Tag = "note";
             lblNote.Font = Ui.Font(10f, FontStyle.Italic);
             y += 44;
@@ -1294,9 +1839,32 @@ namespace PZMemoryTool
             // Ko-fi link, right above the Save button
             lnkKofi.Text = "Support ComfyPlacebo on Ko-fi: ko-fi.com/comfyplacebo";
             lnkKofi.LinkBehavior = LinkBehavior.HoverUnderline;
-            Ui.Place(lnkKofi, 15, y, W - 30, 24);
+            Ui.Place(lnkKofi, 15, y, LeftW, 24);
             lnkKofi.LinkClicked += delegate { OpenKofi(); };
             y += 30;
+
+            // Console Copier box: right side, centred beside "Current allocation" ... Ko-fi link
+            int regionBottom = y - 6;
+            BoxX = Math.Min(MaxBoxX, Math.Max(BoxX, leftRight + 15));
+            int boxW = W - 20 - BoxX, boxH = BoxH;
+            int boxTop = regionTop + (regionBottom - regionTop - boxH) / 2;
+            Ui.Place(boxConsole, BoxX, boxTop, boxW, boxH);
+            boxConsole.Title = "Console Copier";
+            boxConsole.TitleFont = MonoFont(10f, FontStyle.Bold);
+            Ui.Place(lblConsoleInfo, 14, 30, boxW - 28, 122);
+            lblConsoleInfo.Text = "Copies Project Zomboid's console.txt log file to your clipboard.\n\n" +
+                                  "Paste it into Discord, a message or a folder with right click or Ctrl+V.";
+            lblConsoleInfo.Font = Ui.Font(9f);
+            lblConsoleInfo.TextAlign = ContentAlignment.TopCenter;
+            Ui.Place(lblConsoleStatus, 10, boxH - 112, boxW - 20, 54);
+            lblConsoleStatus.Tag = "note";
+            lblConsoleStatus.Font = Ui.Font(8.5f);
+            lblConsoleStatus.TextAlign = ContentAlignment.BottomCenter;
+            btnCopyConsole.Text = "Copy Console";
+            int copyW = Math.Min(130, boxW - 24);
+            Ui.Place(btnCopyConsole, (boxW - copyW) / 2, boxH - 52, copyW, 34);
+            btnCopyConsole.Click += delegate { CopyConsole(); };
+            boxConsole.Controls.AddRange(new Control[] { lblConsoleInfo, lblConsoleStatus, btnCopyConsole });
 
             btnSave.Text = "Save";
             btnSave.Tag = "primary";
@@ -1315,20 +1883,65 @@ namespace PZMemoryTool
 
             ClientSize = new Size(Ui.S(W), Ui.S(y));
 
-            Controls.AddRange(new Control[] { banner, title, lblPath, lblInstalled, lblCurrent, lblRecommend,
-                lblNew, cboGB, btnRecommended, lblWarning, lblNote, lnkKofi, btnSave, btnRestore, btnClose });
+            Controls.AddRange(new Control[] { banner, title, lblPath, lblSteam, lblSteamNote, lblInstalled, lblCurrent,
+                lblRecommend, chkXms, cboXms, lblNew, cboGB, btnRecommended, lblWarning, lblNote, lnkKofi,
+                boxConsole, btnSave, btnRestore, btnClose, btnRefresh });
 
             LoadValues();
         }
 
-        int SelectedGB
+        // Measured pixel widths -> layout units at 100% scaling
+        static int Unscaled(int px) { return (int)Math.Ceiling(px / Ui.Scale); }
+
+        static Font MonoFont(float size, FontStyle style)
         {
-            get { return cboGB.SelectedItem == null ? 0 : (int)cboGB.SelectedItem; }
+            try
+            {
+                Font f = new Font("Consolas", size, style);
+                if (f.Name == "Consolas") return f;
+                f.Dispose();
+            }
+            catch { }
+            return new Font(FontFamily.GenericMonospace, size, style);
         }
 
-        void SelectGB(int gb)
+        int SelectedGB
         {
-            if (cboGB.Items.Contains(gb)) cboGB.SelectedItem = gb;
+            get { GbItem it = cboGB.SelectedItem as GbItem; return it == null ? 0 : it.GB; }
+        }
+
+        void SelectGB(int gb) { SelectIn(cboGB, gb); }
+
+        static bool SelectIn(ComboBox cb, int gb)
+        {
+            foreach (object o in cb.Items)
+                if (((GbItem)o).GB == gb) { cb.SelectedItem = o; return true; }
+            return false;
+        }
+
+        // Minimum dropdown: 4 GB up to (selected maximum - 1 GB). Keeps the choice if it still fits.
+        void UpdateXmsOptions()
+        {
+            GbItem cur = cboXms.SelectedItem as GbItem;
+            int keep = cur == null ? Settings.DefaultXmsGB : cur.GB;
+            int top = SelectedGB - 1;
+            cboXms.Items.Clear();
+            for (int gb = Settings.MinXmsGB; gb <= top; gb++) cboXms.Items.Add(new GbItem(gb));
+            if (cboXms.Items.Count == 0) return;
+            if (!SelectIn(cboXms, Math.Min(keep, top))) cboXms.SelectedIndex = 0;
+        }
+
+        // Refresh button: read everything again, keeping the user's choices where they still apply.
+        void RefreshValues()
+        {
+            int keepMax = SelectedGB;
+            GbItem xmsItem = cboXms.SelectedItem as GbItem;
+            int keepMin = xmsItem == null ? 0 : xmsItem.GB;
+            bool keepTick = chkXms.Checked;
+            LoadValues();
+            if (keepMax > 0) SelectGB(keepMax);
+            if (chkXms.Enabled) chkXms.Checked = keepTick;
+            if (keepMin > 0) SelectIn(cboXms, keepMin);
         }
 
         void LoadValues()
@@ -1336,7 +1949,10 @@ namespace PZMemoryTool
             string text = File.ReadAllText(jsonPath);
             Match m = XmxParser.Find(text);
             currentMB = XmxParser.ToMB(m);
+            Match xms = XmxParser.FindXms(text);
+            currentXmsMB = xms == null ? 0 : XmxParser.ToMB(xms);
             installedMB = SystemMemory.InstalledMB();
+            CheckSteamLaunchOptions();
 
             double installedGB = installedMB / 1024.0;
             int installedWholeGB = (int)Math.Round(installedGB);
@@ -1359,39 +1975,48 @@ namespace PZMemoryTool
             }
             else if (installedWholeGB >= Settings.Tier12)
             {
-                tier = 12; recommendedGB = 6; recommendText = "6 GB or 8 GB (only these two options)";
+                tier = 12; recommendedGB = 6; recommendText = "6 GB or 8 GB only";
                 foreach (int gb in new int[] { 6, 8 }) if (gb <= maxGB) options.Add(gb);
             }
             else if (installedWholeGB >= Settings.Tier8)
             {
-                tier = 8; recommendedGB = 5; recommendText = "5 GB or 6 GB (only these two options)";
+                tier = 8; recommendedGB = 5; recommendText = "5 GB or 6 GB only";
                 foreach (int gb in new int[] { 5, 6 }) if (gb <= maxGB) options.Add(gb);
             }
             else
             {
-                tier = 0; recommendedGB = 0; recommendText = "None - less than 8 GB installed";
+                tier = 0; recommendedGB = 0; recommendText = "none (under 8 GB)";
             }
 
-            lblPath.Text = "File: " + jsonPath;
+            lblPath.Text = "File Found: " + jsonPath;
             lblInstalled.Text = "Total installed memory:   " + installedGB.ToString("0.#") + " GB";
-            lblCurrent.Text   = "Current allocation (-Xmx):   " + (currentMB / 1024.0).ToString("0.#") +
-                                " GB   (" + m.Value + ")";
-            lblRecommend.Text = "Recommended allocation for this PC:   " + recommendText;
+            lblCurrent.Text   = "Current allocation (-Xmx / -Xms):   " + XmxParser.Describe(currentMB) + " / " +
+                                (currentXmsMB > 0 ? XmxParser.Describe(currentXmsMB) : "not set");
+            lblRecommend.Text = "Recommended allocation for this PC (-Xmx):   " + recommendText;
 
             cboGB.Items.Clear();
-            foreach (int gb in options) cboGB.Items.Add(gb);
+            cboXms.Items.Clear();
+            foreach (int gb in options) cboGB.Items.Add(new GbItem(gb));
             if (options.Count > 0)
             {
-                if (options.Contains(recommendedGB)) SelectGB(recommendedGB);
-                else cboGB.SelectedIndex = 0;
+                if (!SelectIn(cboGB, recommendedGB)) cboGB.SelectedIndex = 0;
             }
+            UpdateXmsOptions();
+            SelectIn(cboXms, Settings.DefaultXmsGB);
 
-            // Under 8 GB: everything locked except Close
+            // Minimum (-Xms): ticked by default on 12 GB and up; locked off on 8 GB; hidden under 8 GB
+            chkXms.Visible = cboXms.Visible = tier != 0;
+            chkXms.Enabled = tier >= Settings.Tier12;
+            chkXms.Checked = tier >= Settings.Tier12;
+            cboXms.Enabled = chkXms.Enabled && chkXms.Checked;
+            if (tier == 8) cboXms.SelectedIndex = -1;   // locked off: show no value
+
+            // Under 8 GB: everything locked except Close (and the Console Copier)
             bool locked = (tier == 0 || options.Count == 0);
             cboGB.Enabled = !locked;
             btnRecommended.Enabled = !locked;
             btnSave.Enabled = !locked;
-            btnRestore.Enabled = !locked && File.Exists(jsonPath + ".bak");
+            btnRestore.Enabled = !locked && (File.Exists(jsonPath + ".bak") || SteamRestoreAvailable());
             UpdateWarning();
         }
 
@@ -1419,7 +2044,7 @@ namespace PZMemoryTool
                     note = "Try 6 GB first. If that doesn't work, try 8 GB.";
                     break;
                 case 8:
-                    w = "WARNING: Running Project Zomboid with 8 GB of RAM is unsupported. " +
+                    w = "WARNING: 8 GB of RAM on heavily modified servers is not recommended. " +
                         "It is recommended to upgrade to at least " + Settings.RecommendedUpgrade +
                         " GB of total installed memory.";
                     note = "Try 5 GB first. If that doesn't work, try 6 GB.";
@@ -1435,13 +2060,64 @@ namespace PZMemoryTool
             lblNote.Text = note;
         }
 
+        // Reads the signed-in Steam account's launch options for Project Zomboid and shows the result.
+        void CheckSteamLaunchOptions()
+        {
+            steamEntries.Clear();
+            steamChecked = SteamLaunchOptions.ConfigFiles().Count > 0;
+            List<string> args = new List<string>();
+            foreach (LaunchOptionsEntry e in SteamLaunchOptions.FindAll())
+            {
+                string mem = SteamLaunchOptions.MemoryArgs(e.Value);
+                if (mem.Length == 0) continue;
+                steamEntries.Add(e);
+                if (!args.Contains(mem)) args.Add(mem);
+            }
+
+            if (steamEntries.Count > 0)
+            {
+                lblSteam.Text = "Steam Memory Allocation Launch Option:   " + string.Join(", ", args.ToArray());
+                lblSteam.Tag = "warn";
+                lblSteamNote.Text = "This overrides the file above. It will be removed from Steam's launch options when you save.";
+                lblSteamNote.Tag = "warn";
+            }
+            else
+            {
+                lblSteam.Text = steamChecked
+                    ? "Steam Memory Allocation Launch Option:   none"
+                    : "Steam Memory Allocation Launch Option:   could not check (Steam settings not found)";
+                lblSteam.Tag = "sub";
+                lblSteamNote.Text = "";
+                lblSteamNote.Tag = "sub";
+            }
+            Theme.Apply(this);   // refresh colours for the warn / normal state
+        }
+
+        // True if this tool changed the Steam launch options and the original can be put back.
+        bool SteamRestoreAvailable()
+        {
+            foreach (string f in SteamLaunchOptions.ConfigFiles())
+            {
+                string old = SteamLaunchOptions.BackedUpValue(f);
+                if (old != null && old != SteamLaunchOptions.CurrentValue(f)) return true;
+            }
+            return false;
+        }
+
         void Save()
         {
             int gb = SelectedGB;
             if (gb < Settings.MinAllocGB) return;
+            int xmsGB = XmsGB;
 
             // Make sure the game wasn't started while this window was open
             if (!ProcessGuard.EnsureGameClosed()) return;
+
+            // Steam launch options with -Xmx / -Xms need Steam closed, or Steam writes them back
+            CheckSteamLaunchOptions();
+            bool fixSteam = steamEntries.Count > 0 &&
+                ProcessGuard.EnsureSteamClosed("remove the memory settings from",
+                    "save without changing the Steam launch options");
 
             try
             {
@@ -1450,10 +2126,28 @@ namespace PZMemoryTool
                 if (!File.Exists(backup))
                     File.Copy(jsonPath, backup);   // keep the very first original as backup
 
-                File.WriteAllText(jsonPath, XmxParser.Replace(text, gb));
-                MessageBox.Show("Saved. Project Zomboid will now use " + gb + " GB (-Xmx" + (gb * 1024) + "m).\n\n" +
-                    "A backup of the original file is at:\n" + backup,
-                    "PZ Memory Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                File.WriteAllText(jsonPath, XmxParser.SetMemory(text, gb, xmsGB));
+
+                // Read the file back and check both values really are in it
+                string check = File.ReadAllText(jsonPath);
+                Match cx = XmxParser.Find(check), cs = XmxParser.FindXms(check);
+                bool xmxOk = cx != null && XmxParser.ToMB(cx) == gb * 1024L;
+                bool xmsOk = xmsGB > 0 ? (cs != null && XmxParser.ToMB(cs) == xmsGB * 1024L && cs.Index < cx.Index)
+                                       : cs == null;
+                string verify = (xmxOk && xmsOk) ? "" :
+                    "\n\nWARNING: the file could not be fully updated (" +
+                    (xmxOk ? "" : "-Xmx ") + (xmsOk ? "" : "-Xms ") + "not as expected). " +
+                    "Please send your ProjectZomboid64.json to ComfyPlacebo so this can be fixed.";
+
+                string msg = "Saved. Project Zomboid will now use:\n\n" +
+                             "     Minimum memory (-Xms):   " +
+                             (xmsGB > 0 ? xmsGB + " GB   (-Xms" + (xmsGB * 1024) + "m)"
+                                        : (tier == 8 ? "not set (8 GB system)" : "not set (turned off)")) + "\n" +
+                             "     Maximum memory (-Xmx):   " + gb + " GB   (-Xmx" + (gb * 1024) + "m)\n\n" +
+                             SteamReport(fixSteam) + "\n\n" +
+                             "A backup of the original file is at:\n" + backup + verify;
+                MessageBox.Show(msg, "PZ Memory Tool", MessageBoxButtons.OK,
+                    verify.Length == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
                 LoadValues();
             }
             catch (UnauthorizedAccessException)
@@ -1464,6 +2158,74 @@ namespace PZMemoryTool
             {
                 MessageBox.Show("Could not save the file:\n" + ex.Message, "PZ Memory Tool",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        }
+
+        // Removes -Xmx / -Xms from the Steam launch options (if allowed) and describes what happened.
+        string SteamReport(bool fixSteam)
+        {
+            if (steamEntries.Count == 0)
+                return steamChecked
+                    ? "Steam launch options: no memory settings found, nothing to change."
+                    : "Steam launch options: could not be checked (Steam settings not found).";
+
+            List<string> removed = new List<string>(), failed = new List<string>(), backups = new List<string>();
+            foreach (LaunchOptionsEntry e in steamEntries)
+            {
+                string mem = SteamLaunchOptions.MemoryArgs(e.Value);
+                if (!fixSteam) { failed.Add(mem); continue; }
+                try
+                {
+                    string b = SteamLaunchOptions.RemoveMemoryArgs(e.ConfigFile);
+                    if (b != null) { removed.Add(mem); backups.Add(b); }
+                }
+                catch { failed.Add(mem); }
+            }
+
+            string r = "";
+            if (removed.Count > 0)
+                r = "Steam launch options: successfully removed " + string.Join(", ", removed.ToArray()) +
+                    ".\nSteam backup: " + string.Join("\n", backups.ToArray());
+            if (failed.Count > 0)
+                r += (r.Length > 0 ? "\n\n" : "") +
+                     "Steam launch options were NOT changed and still contain " + string.Join(", ", failed.ToArray()) +
+                     ". These override the setting above. Remove them in Steam: right-click Project Zomboid > " +
+                     "Properties > General > Launch Options.";
+            return r;
+        }
+
+        // Copies console.txt to the clipboard as a file (paste into Discord or a folder with Ctrl+V).
+        // A snapshot is copied to a temp folder first, so the game can keep writing its log.
+        void CopyConsole()
+        {
+            string console = Path.Combine(Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Zomboid"), "console.txt");
+            if (!File.Exists(console))
+            {
+                lblConsoleStatus.Text = "console.txt not found.\nStart Project Zomboid once to create it.";
+                return;
+            }
+            try
+            {
+                string dir = Path.Combine(Path.GetTempPath(), "PZMemoryTool");
+                Directory.CreateDirectory(dir);
+                string copy = Path.Combine(dir, "console.txt");
+                using (FileStream src = new FileStream(console, FileMode.Open, FileAccess.Read,
+                                                       FileShare.ReadWrite | FileShare.Delete))
+                using (FileStream dst = new FileStream(copy, FileMode.Create, FileAccess.Write))
+                    src.CopyTo(dst);
+
+                System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
+                files.Add(copy);
+                Clipboard.SetFileDropList(files);
+
+                long kb = new FileInfo(copy).Length / 1024;
+                lblConsoleStatus.Text = "Copied console.txt\n(" + (kb >= 1024 ? (kb / 1024.0).ToString("0.0") + " MB" : kb + " KB") +
+                                        ", " + File.GetLastWriteTime(console).ToString("t") + ")";
+            }
+            catch (Exception ex)
+            {
+                lblConsoleStatus.Text = "Could not copy console.txt:\n" + ex.Message;
             }
         }
 
@@ -1483,21 +2245,54 @@ namespace PZMemoryTool
             }
         }
 
+        // Puts back the original game file and the original Steam launch options.
         void RestoreBackup()
         {
             string backup = jsonPath + ".bak";
-            if (!File.Exists(backup)) return;
-            if (MessageBox.Show("Restore the original file from the backup?", "PZ Memory Tool",
-                    MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
+            bool fileBackup = File.Exists(backup);
+            bool steamBackup = SteamRestoreAvailable();
+            if (!fileBackup && !steamBackup) return;
+
+            if (MessageBox.Show("Restore the original settings from the backup?\n\n" +
+                    (fileBackup ? "  - the game file (ProjectZomboid64.json)\n" : "") +
+                    (steamBackup ? "  - Project Zomboid's Steam launch options\n" : ""),
+                    "PZ Memory Tool", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             if (!ProcessGuard.EnsureGameClosed()) return;
+
+            bool doSteam = steamBackup && ProcessGuard.EnsureSteamClosed("restore",
+                "restore only the game file and leave the Steam launch options as they are");
+
+            List<string> done = new List<string>();
             try
             {
-                File.Copy(backup, jsonPath, true);
-                LoadValues();
-                MessageBox.Show("Original file restored.", "PZ Memory Tool");
+                if (fileBackup)
+                {
+                    File.Copy(backup, jsonPath, true);
+                    done.Add("Game file restored.");
+                }
             }
-            catch (UnauthorizedAccessException) { OfferAdminRelaunch(); }
-            catch (Exception ex) { MessageBox.Show("Restore failed:\n" + ex.Message, "PZ Memory Tool"); }
+            catch (UnauthorizedAccessException) { OfferAdminRelaunch(); return; }
+            catch (Exception ex) { MessageBox.Show("Restore failed:\n" + ex.Message, "PZ Memory Tool"); return; }
+
+            if (steamBackup)
+            {
+                if (!doSteam)
+                    done.Add("Steam launch options were NOT restored (Steam was still running).");
+                else
+                {
+                    try
+                    {
+                        foreach (string f in SteamLaunchOptions.ConfigFiles())
+                            if (SteamLaunchOptions.RestoreFromBackup(f))
+                                done.Add("Steam launch options restored to: " + SteamLaunchOptions.CurrentValue(f));
+                    }
+                    catch (Exception ex) { done.Add("Steam launch options could not be restored: " + ex.Message); }
+                }
+            }
+
+            LoadValues();
+            MessageBox.Show(string.Join("\n\n", done.ToArray()), "PZ Memory Tool",
+                MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // Files under Program Files need administrator rights to change.
