@@ -8,6 +8,7 @@
 
 #include <ctype.h>
 #include <dirent.h>
+#include <time.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
@@ -245,7 +246,7 @@ MemArg find_mem_arg(const char *text, char flag)
     return r;
 }
 
-static char *str_splice(const char *text, size_t at, size_t remove, const char *insert)
+char *str_splice(const char *text, size_t at, size_t remove, const char *insert)
 {
     size_t tl = strlen(text), il = strlen(insert);
     char *out = malloc(tl - remove + il + 1);
@@ -277,6 +278,12 @@ static char *remove_xms(const char *text)
     size_t e;
     long q = quoted_entry(text, 's', &e);
     if (q < 0) return strdup(text);
+    return json_remove_entry(text, q, e);
+}
+
+/* Removes the quoted list entry at q (opening quote) .. e (after closing quote), keeping valid JSON. */
+char *json_remove_entry(const char *text, long q, size_t e)
+{
 
     size_t ls = (size_t)q;
     while (ls > 0 && text[ls - 1] != '\n') ls--;
@@ -293,7 +300,7 @@ static char *remove_xms(const char *text)
     bool at_eol = text[line_end] == '\n';
 
     if (ws_before && at_eol) {
-        /* -Xms is alone on its line: remove the whole line */
+        /* the entry is alone on its line: remove the whole line */
         char *out = str_splice(text, ls, line_end + 1 - ls, "");
         if (!comma_after) {
             /* it was the last entry: drop the comma after the entry before it */
@@ -303,7 +310,7 @@ static char *remove_xms(const char *text)
         }
         return out;
     }
-    /* -Xms shares a line with other entries: remove it and one neighbouring comma */
+    /* the entry shares a line with other entries: remove it and one neighbouring comma */
     if (comma_after) return str_splice(text, (size_t)q, a - (size_t)q, "");
     long c = q - 1;
     while (c >= 0 && (text[c] == ' ' || text[c] == '\t')) c--;
@@ -558,87 +565,178 @@ static bool val_cb(const char **path, int depth, const char *key, size_t kl,
     return true;
 }
 
-/* Default Steam folders, every Steam library, and Project Zomboid's app manifest. */
-char *find_game_json(void)
+/* Every Steam library folder (default Steam folders + libraryfolders.vdf). */
+int steam_libraries(char libs[][1024], int max)
 {
     char roots[MAX_STEAM_ROOTS][1024];
     int nr = steam_roots(roots, MAX_STEAM_ROOTS);
     LibList L = {0};
     for (int r = 0; r < nr; r++) {
-        snprintf(L.libs[L.n++], 1024, "%s", roots[r]);
+        bool dup = false;
+        for (int k = 0; k < L.n; k++) if (!strcmp(L.libs[k], roots[r])) dup = true;
+        if (!dup && L.n < 32) snprintf(L.libs[L.n++], 1024, "%s", roots[r]);
         char vdf[PATH_MAX];
         snprintf(vdf, sizeof vdf, "%s/steamapps/libraryfolders.vdf", roots[r]);
         char *t = read_file(vdf, NULL);
         if (t) { vdf_walk(t, lib_cb, &L); free(t); }
     }
-    for (int i = 0; i < L.n; i++) {
-        char manifest[PATH_MAX], cand[PATH_MAX];
-        snprintf(manifest, sizeof manifest, "%s/steamapps/appmanifest_%s.acf", L.libs[i], STEAM_APP_ID);
+    int n = 0;
+    for (int i = 0; i < L.n && n < max; i++) snprintf(libs[n++], 1024, "%s", L.libs[i]);
+    return n;
+}
+
+/* Checks <dir>/ProjectZomboid64.json and <dir>/projectzomboid/ProjectZomboid64.json */
+static char *json_in_game_dir(const char *dir)
+{
+    const char *subs[] = { "", "/projectzomboid" };
+    for (int k = 0; k < 2; k++) {
+        char cand[PATH_MAX];
+        snprintf(cand, sizeof cand, "%s%s/%s", dir, subs[k], JSON_NAME);
+        bool ok = is_valid_pz_json(cand);
+        pzlog("  checking %s: %s", cand, ok ? "FOUND" : file_exists(cand) ? "exists but not valid" : "not there");
+        if (ok) return strdup(cand);
+    }
+    return NULL;
+}
+
+/* Default Steam folders, every Steam library, and Project Zomboid's app manifest. */
+char *find_game_json(void)
+{
+    char libs[32][1024];
+    int n = steam_libraries(libs, 32);
+    pzlog("Looking for the game in %d Steam librar%s", n, n == 1 ? "y" : "ies");
+    for (int i = 0; i < n; i++) {
+        char manifest[PATH_MAX], dir[PATH_MAX];
+        pzlog(" library: %s", libs[i]);
+        snprintf(manifest, sizeof manifest, "%s/steamapps/appmanifest_%s.acf", libs[i], STEAM_APP_ID);
         char *t = read_file(manifest, NULL);
         if (t) {
             ValFind f = { .want = "installdir" };
             vdf_walk(t, val_cb, &f);
             free(t);
+            pzlog("  app manifest found, installdir = \"%s\"", f.value);
             if (f.value[0]) {
-                snprintf(cand, sizeof cand, "%s/steamapps/common/%s/%s", L.libs[i], f.value, JSON_NAME);
-                if (is_valid_pz_json(cand)) return strdup(cand);
+                snprintf(dir, sizeof dir, "%s/steamapps/common/%s", libs[i], f.value);
+                char *r = json_in_game_dir(dir);
+                if (r) return r;
             }
         }
-        snprintf(cand, sizeof cand, "%s/steamapps/common/ProjectZomboid/%s", L.libs[i], JSON_NAME);
-        if (is_valid_pz_json(cand)) return strdup(cand);
+        snprintf(dir, sizeof dir, "%s/steamapps/common/ProjectZomboid", libs[i]);
+        char *r = json_in_game_dir(dir);
+        if (r) return r;
     }
+    pzlog("Game file not found in any Steam library");
     return NULL;
 }
 
 /* Signed-in account: Steam's ActiveUser, otherwise the most recent sign-in. */
-typedef struct { char id[32]; bool in_user; char cur[32]; } LoginFind;
+/* loginusers.vdf: every account, with its MostRecent flag and last sign-in time */
+typedef struct { char id[16][32]; int most_recent[16]; long long ts[16]; int n; } LoginList;
 static bool login_cb(const char **path, int depth, const char *key, size_t kl,
                      const char *val, size_t vl, size_t val_pos, void *ud)
 {
     (void)val_pos;
-    LoginFind *f = ud;
-    if (depth >= 2 && kl == 10 && strncasecmp(key, "MostRecent", 10) == 0 && vl == 1 && val[0] == '1') {
-        const char *uid = path[depth - 1];
-        if (strlen(uid) == 17) { snprintf(f->id, sizeof f->id, "%s", uid); return false; }
+    LoginList *L = ud;
+    if (depth < 2) return true;
+    const char *uid = path[depth - 1];
+    if (strlen(uid) != 17) return true;
+    int k;
+    for (k = 0; k < L->n; k++) if (!strcmp(L->id[k], uid)) break;
+    if (k == L->n) { if (L->n >= 16) return true; snprintf(L->id[L->n++], 32, "%s", uid); }
+    char v[32] = "";
+    snprintf(v, sizeof v, "%.*s", (int)(vl < 31 ? vl : 31), val);
+    if (kl == 10 && !strncasecmp(key, "MostRecent", 10)) L->most_recent[k] = atoi(v);
+    if (kl == 9 && !strncasecmp(key, "Timestamp", 9)) L->ts[k] = atoll(v);
+    return true;
+}
+
+/* registry.vdf can hold more than one "ActiveUser" (e.g. an empty one and the real one) */
+typedef struct { long best; char all[256]; } ActiveFind;
+static bool active_cb(const char **path, int depth, const char *key, size_t kl,
+                      const char *val, size_t vl, size_t val_pos, void *ud)
+{
+    (void)path; (void)depth; (void)val_pos;
+    ActiveFind *f = ud;
+    if (kl == 10 && !strncasecmp(key, "ActiveUser", 10)) {
+        char v[32];
+        snprintf(v, sizeof v, "%.*s", (int)(vl < 31 ? vl : 31), val);
+        size_t l = strlen(f->all);
+        snprintf(f->all + l, sizeof f->all - l, "%s\"%s\"", l ? ", " : "", v);
+        if (!f->best && atol(v) > 0) f->best = atol(v);
     }
     return true;
 }
 
+/* Signed-in account: Steam's ActiveUser, then loginusers.vdf, then the newest userdata folder. */
 long steam_account_id(void)
 {
     char reg[PATH_MAX];
     snprintf(reg, sizeof reg, "%s/.steam/registry.vdf", home_dir());
     char *t = read_file(reg, NULL);
     if (t) {
-        ValFind f = { .want = "ActiveUser" };
-        vdf_walk(t, val_cb, &f);
+        ActiveFind f = {0};
+        vdf_walk(t, active_cb, &f);
         free(t);
-        long v = atol(f.value);
-        if (v > 0) return v;
-    }
+        pzlog("Steam registry.vdf ActiveUser values: %s", f.all[0] ? f.all : "(none)");
+        if (f.best > 0) return f.best;
+    } else pzlog("Steam registry.vdf: not found at %s", reg);
+
     char roots[MAX_STEAM_ROOTS][1024];
     int nr = steam_roots(roots, MAX_STEAM_ROOTS);
     for (int r = 0; r < nr; r++) {
         char p[PATH_MAX];
         snprintf(p, sizeof p, "%s/config/loginusers.vdf", roots[r]);
         char *lt = read_file(p, NULL);
-        if (!lt) continue;
-        LoginFind f = {0};
-        vdf_walk(lt, login_cb, &f);
+        if (!lt) { pzlog("loginusers.vdf: not found at %s", p); continue; }
+        LoginList L = {0};
+        vdf_walk(lt, login_cb, &L);
         free(lt);
-        if (f.id[0]) return (long)(atoll(f.id) - 76561197960265728LL);
+        int pick = -1;
+        for (int k = 0; k < L.n; k++) {
+            pzlog("  loginusers.vdf account %s: MostRecent %d, Timestamp %lld", L.id[k], L.most_recent[k], L.ts[k]);
+            if (L.most_recent[k] == 1 && pick < 0) pick = k;
+        }
+        if (pick < 0)   /* nobody marked MostRecent: the latest sign-in */
+            for (int k = 0; k < L.n; k++) if (pick < 0 || L.ts[k] > L.ts[pick]) pick = k;
+        if (pick >= 0) {
+            pzlog("Steam account from loginusers.vdf: %s", L.id[pick]);
+            return (long)(atoll(L.id[pick]) - 76561197960265728LL);
+        }
     }
-    return 0;
+
+    /* last resort: the account folder whose settings changed most recently */
+    long best = 0; time_t best_t = 0;
+    for (int r = 0; r < nr; r++) {
+        char ud[PATH_MAX];
+        snprintf(ud, sizeof ud, "%s/userdata", roots[r]);
+        DIR *d = opendir(ud);
+        if (!d) continue;
+        struct dirent *e;
+        while ((e = readdir(d))) {
+            long id = atol(e->d_name);
+            if (id <= 0) continue;
+            char lc[PATH_MAX];
+            snprintf(lc, sizeof lc, "%s/%s/config/localconfig.vdf", ud, e->d_name);
+            struct stat st;
+            if (stat(lc, &st) != 0) continue;
+            pzlog("  userdata account %ld: localconfig.vdf changed %ld", id, (long)st.st_mtime);
+            if (st.st_mtime > best_t) { best_t = st.st_mtime; best = id; }
+        }
+        closedir(d);
+    }
+    if (best) pzlog("Steam account from the newest userdata folder: %ld", best);
+    return best;
 }
 
 bool steam_config_file(char *out, size_t n)
 {
     long id = steam_account_id();
-    if (id <= 0) return false;
+    if (id <= 0) { pzlog("No signed-in Steam account found"); return false; }
     char roots[MAX_STEAM_ROOTS][1024];
     int nr = steam_roots(roots, MAX_STEAM_ROOTS);
     for (int r = 0; r < nr; r++) {
         snprintf(out, n, "%s/userdata/%ld/config/localconfig.vdf", roots[r], id);
+        pzlog("  Steam settings %s: %s", out, file_exists(out) ? "found" : "not there");
         if (file_exists(out)) return true;
     }
     return false;
@@ -706,8 +804,110 @@ bool steam_restore_from_backup(const char *cfg)
     return ok;
 }
 
+/* Position just after the "{" of Software/Valve/Steam/apps/108600 in localconfig.vdf, or -1. */
+static long find_app_section(const char *t)
+{
+    char path[32][128];
+    int depth = 0;
+    const char *pending = NULL; size_t pl = 0;
+    size_t i = 0, n = strlen(t);
+    while (i < n) {
+        char c = t[i];
+        if (isspace((unsigned char)c)) { i++; continue; }
+        if (c == '/' && t[i + 1] == '/') { while (i < n && t[i] != '\n') i++; continue; }
+        if (c == '{') {
+            if (depth < 32) { size_t k = pending ? (pl < 127 ? pl : 127) : 0; memcpy(path[depth], pending ? pending : "", k); path[depth][k] = 0; }
+            depth++;
+            if (depth >= 5 && depth <= 32 && !strcasecmp(path[depth - 1], STEAM_APP_ID) && !strcasecmp(path[depth - 2], "apps") &&
+                !strcasecmp(path[depth - 3], "Steam") && !strcasecmp(path[depth - 4], "Valve") && !strcasecmp(path[depth - 5], "Software"))
+                return (long)i + 1;
+            pending = NULL; i++; continue;
+        }
+        if (c == '}') { if (depth > 0) depth--; pending = NULL; i++; continue; }
+        if (c == '"') {
+            size_t st = ++i;
+            while (i < n && t[i] != '"') { if (t[i] == '\\') i++; i++; }
+            if (!pending) { pending = t + st; pl = i - st; } else pending = NULL;
+            i++;
+            continue;
+        }
+        i++;
+    }
+    return -1;
+}
+
+/* Changes Project Zomboid's launch options for the signed-in account. edit() gets the current
+ * value and returns the new one (malloc'd). Backs up localconfig.vdf to <cfg><backup_suffix> once.
+ * Returns 1 changed, 0 nothing to change, -1 error. */
+int steam_edit_launch_options(const char *cfg, char *(*edit)(const char *cur, void *ud), void *ud,
+                              const char *backup_suffix, char *backup_out, size_t bn)
+{
+    char *text = read_file(cfg, NULL);
+    if (!text) { pzlog("steam_edit_launch_options: cannot read %s", cfg); return -1; }
+    LoLoc l = locate_launch_options(text);
+    char *cur;
+    if (l.found) { cur = malloc(l.len + 1); memcpy(cur, text + l.pos, l.len); cur[l.len] = 0; }
+    else cur = strdup("");
+    char *nv = edit(cur, ud);
+    pzlog("Steam launch options: \"%s\" -> \"%s\"%s", cur, nv, l.found ? "" : " (no LaunchOptions entry yet)");
+    int rc = 0;
+    if (strcmp(cur, nv) != 0) {
+        char *updated = NULL;
+        if (l.found) updated = str_splice(text, l.pos, l.len, nv);
+        else {
+            long at = find_app_section(text);
+            if (at >= 0) {
+                /* indent like the line holding the section's "{" plus one tab */
+                long ls = at - 1;
+                while (ls > 0 && text[ls - 1] != '\n') ls--;
+                char indent[64] = ""; int k = 0;
+                for (long j = ls; j < at - 1 && k < 62 && (text[j] == '\t' || text[j] == ' '); j++) indent[k++] = text[j];
+                indent[k++] = '\t'; indent[k] = 0;
+                Buf ins = {0};
+                buf_addf(&ins, "\n%s\"LaunchOptions\"\t\t\"%s\"", indent, nv);
+                updated = str_splice(text, (size_t)at, 0, ins.s);
+                buf_free(&ins);
+            } else pzlog("Project Zomboid (108600) section not found in %s", cfg);
+        }
+        if (updated) {
+            char b[PATH_MAX];
+            snprintf(b, sizeof b, "%s%s", cfg, backup_suffix);
+            if (!file_exists(b)) { bool ok = copy_file(cfg, b); pzlog("Backup %s: %s", b, ok ? "made" : "FAILED"); }
+            if (backup_out) snprintf(backup_out, bn, "%s", b);
+            rc = write_file(cfg, updated, strlen(updated)) ? 1 : -1;
+            pzlog("Writing %s: %s", cfg, rc == 1 ? "OK" : "FAILED");
+            free(updated);
+        } else rc = -1;
+    }
+    free(cur); free(nv); free(text);
+    return rc;
+}
+
+/* Starts Steam again (after the tool closed it). */
+void steam_start(void)
+{
+    char flat[PATH_MAX];
+    snprintf(flat, sizeof flat, "%s/.var/app/com.valvesoftware.Steam", home_dir());
+    if (command_exists("steam")) { const char *a[] = { "steam", NULL }; spawn_detached(a); pzlog("Started Steam (steam)"); return; }
+    if (dir_exists(flat) && command_exists("flatpak")) {
+        const char *a[] = { "flatpak", "run", "com.valvesoftware.Steam", NULL }; spawn_detached(a); pzlog("Started Steam (flatpak)"); return;
+    }
+    const char *a[] = { "xdg-open", "steam://open/main", NULL };
+    spawn_detached(a);
+    pzlog("Started Steam (xdg-open steam://open/main)");
+}
+
+/* Opens a steam:// link in the Steam client (falls back to the web browser). */
+void steam_open_url(const char *url)
+{
+    if (command_exists("steam")) { const char *a[] = { "steam", url, NULL }; spawn_detached(a); }
+    else { const char *a[] = { "xdg-open", url, NULL }; spawn_detached(a); }
+    pzlog("Opening %s", url);
+}
+
 void steam_request_shutdown(void)
 {
+    pzlog("Asking Steam to close");
     if (command_exists("steam")) {
         const char *a[] = { "steam", "-shutdown", NULL };
         spawn_detached(a);
@@ -731,6 +931,7 @@ bool steam_add_to_steam(void)
     char *me = self_path();
     const char *a[] = { "steamos-add-to-steam", me, NULL };
     int rc = run_wait(a);
+    pzlog("steamos-add-to-steam %s -> exit code %d", me, rc);
     free(me);
     return rc == 0;
 }
@@ -796,12 +997,14 @@ bool in_game_mode(void)
 bool can_switch_session(void) { return command_exists("steamos-session-select"); }
 bool switch_to_desktop_mode(void)
 {
+    pzlog("Switching to Desktop Mode (steamos-session-select plasma)");
     const char *a[] = { "steamos-session-select", "plasma", NULL };
     spawn_detached(a);
     return true;
 }
 bool switch_to_game_mode(void)
 {
+    pzlog("Switching to Game Mode (steamos-session-select gamescope)");
     if (command_exists("steamos-session-select")) {
         const char *a[] = { "steamos-session-select", "gamescope", NULL };
         spawn_detached(a);
@@ -886,6 +1089,9 @@ MemInfo read_memory_info(void)
         counted += mi.uma_gb;                /* the Deck's graphics reserve is part of its 16 GB */
     }
     mi.installed_gb = round_up_installed(counted);
+    pzlog("Memory: MemTotal %.2f GB, DMI vendor \"%s\" product \"%s\" -> %s, UMA %d GB, installed (rounded) %d GB",
+          mi.usable_gb, vendor, product, mi.kind == HW_STEAM_DECK ? "Steam Deck" : mi.kind == HW_STEAM_MACHINE ? "Steam Machine" : "PC",
+          mi.uma_gb, mi.installed_gb);
     return mi;
 }
 
@@ -1089,7 +1295,7 @@ char *pending_fix_read(void)
     char p[PATH_MAX];
     pending_path(p, sizeof p);
     char *t = read_file(p, NULL);
-    if (t) t[strcspn(t, "\r\n")] = 0;
+    if (t) { size_t l = strlen(t); while (l && (t[l - 1] == '\n' || t[l - 1] == '\r')) t[--l] = 0; }
     return t;
 }
 bool pending_fix_exists(void) { char p[PATH_MAX]; pending_path(p, sizeof p); return file_exists(p); }

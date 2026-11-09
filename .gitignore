@@ -1,3 +1,5 @@
 linux/raylib-*/
 linux/PZMemoryTool
+linux/.zig/
+linux/dist/
 *.exe

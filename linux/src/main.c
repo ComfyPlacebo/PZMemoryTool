@@ -13,6 +13,7 @@
 #define _GNU_SOURCE
 #include "pzmt.h"
 #include "raylib.h"
+#define GLFW_INCLUDE_NONE
 #include "GLFW/glfw3.h"   /* only to catch very quick taps and clicks (see below) */
 
 #include <limits.h>
@@ -314,7 +315,7 @@ enum { NAV_NONE, NAV_UP, NAV_DOWN, NAV_LEFT, NAV_RIGHT };
 typedef struct {
     int  nav;          /* direction pressed this frame */
     int  tab;          /* +1 / -1 */
-    bool act, back;
+    bool act, back, copylog;
     bool mouse_pressed, mouse_released;
     Vector2 mouse;     /* in layout units */
     float wheel;
@@ -384,6 +385,7 @@ static void read_input(void)
             case KEY_TAB: in.tab = (IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT)) ? -1 : 1; break;
             case KEY_ENTER: case KEY_KP_ENTER: case KEY_SPACE: in.act = true; break;
             case KEY_ESCAPE: case KEY_BACKSPACE: in.back = true; break;
+            case KEY_F12: in.copylog = true; break;
         }
     }
     if (IsKeyPressedRepeat(KEY_UP)) in.nav = NAV_UP;
@@ -410,13 +412,18 @@ static void read_input(void)
 static bool hover(Rectangle r) { return CheckCollisionPointRec(in.mouse, r); }
 
 /* ---- Focus registry for the main window ------------------------------------- */
-enum { ID_NONE, ID_REFRESH, ID_CHK, ID_XMS, ID_GB, ID_REC, ID_KOFI, ID_COPY, ID_COPYTEXT, ID_SAVE, ID_RESTORE, ID_CLOSE, ID_MAX };
-typedef struct { Rectangle r; bool enabled, used; } FocusItem;
+enum { ID_NONE, ID_REFRESH, ID_CHK, ID_XMS, ID_GB, ID_REC, ID_KOFI, ID_ZB_OPEN, ID_COPY, ID_COPYTEXT, ID_SAVE, ID_RESTORE, ID_CLOSE,
+       /* ZombieBuddy window (layer 1) */
+       ID_ZB_SUB, ID_ZB_STABLE, ID_ZB_BETA, ID_ZB_JSON, ID_ZB_STEAM, ID_ZB_ADV, ID_ZB_POLICY, ID_ZB_VERB,
+       ID_ZB_INSTALL, ID_ZB_UNINSTALL, ID_ZB_CANCEL, ID_MAX };
+typedef struct { Rectangle r; bool enabled, used; int layer; } FocusItem;
+static int draw_layer, active_layer;    /* 0 = main window, 1 = ZombieBuddy window */
 static FocusItem focus_items[ID_MAX];
 static int focus_id = ID_GB;
 static int press_id;                   /* control the mouse went down on */
 
-static void focus_register(int id, Rectangle r, bool enabled) { focus_items[id] = (FocusItem){ r, enabled, true }; }
+static void focus_register(int id, Rectangle r, bool enabled) { focus_items[id] = (FocusItem){ r, enabled, true, draw_layer }; }
+static bool focusable(int i) { return i != ID_NONE && focus_items[i].used && focus_items[i].enabled && focus_items[i].layer == active_layer; }
 
 static int focus_move_dir(int dir)
 {
@@ -426,7 +433,7 @@ static int focus_move_dir(int dir)
     int best = focus_id; float best_score = 1e9f;
     for (int i = 1; i < ID_MAX; i++) {
         FocusItem *f = &focus_items[i];
-        if (i == focus_id || !f->used || !f->enabled) continue;
+        if (i == focus_id || !focusable(i)) continue;
         float fx = f->r.x + f->r.width / 2, fy = f->r.y + f->r.height / 2;
         float dx = fx - cx, dy = fy - cy, main, side;
         switch (dir) {
@@ -444,7 +451,7 @@ static void focus_tab(int step)
 {
     for (int k = 0; k < ID_MAX; k++) {
         focus_id = (focus_id + step + ID_MAX) % ID_MAX;
-        if (focus_id != ID_NONE && focus_items[focus_id].used && focus_items[focus_id].enabled) return;
+        if (focusable(focus_id)) return;
     }
 }
 
@@ -487,7 +494,9 @@ static bool ui_button(int id, Rectangle r, const char *label, bool enabled, int 
     box_border(r, 4, fill, border);
     float tw = text_w(font, label);
     text_at(font, label, r.x + (r.width - tw) / 2, r.y + (r.height - FONTS[font].px) / 2 - 1, fg);
-    return clicked(id, r, enabled);
+    bool c = clicked(id, r, enabled);
+    if (c) pzlog("Button: %s (%s)", label, in.mouse_released ? "mouse/touch" : "keyboard/controller");
+    return c;
 }
 
 /* Circular-arrow "refresh" button */
@@ -529,12 +538,12 @@ static bool ui_checkbox(int id, Rectangle r, const char *label, bool *value, boo
     box_border(b, 3, fill, border);
     if (*value) draw_check(b, enabled ? T.on_accent : T.sub);
     text_at(F_UI, label, r.x + 24, r.y + (r.height - FONTS[F_UI].px) / 2 - 1, enabled ? T.fg : T.sub);
-    if (clicked(id, r, enabled)) { *value = !*value; return true; }
+    if (clicked(id, r, enabled)) { *value = !*value; pzlog("Checkbox: %s -> %s", label, *value ? "on" : "off"); return true; }
     return false;
 }
 
 /* Dropdown list (open popup is drawn and handled separately, above everything) */
-typedef struct { bool open; int id; Rectangle r; int *items; int count; int *sel; int hot; int scroll; bool changed; } Popup;
+typedef struct { bool open; int id; Rectangle r; int *items; const char *const *labels; int count; int *sel; int hot; int scroll; bool changed; } Popup;
 static Popup pop;
 #define POP_ITEM_H 26
 #define POP_MAX    10
@@ -551,15 +560,18 @@ static void popup_rect(Rectangle *out, int *visible)
     *visible = vis;
 }
 
-static bool ui_combo(int id, Rectangle r, int *items, int count, int *sel, bool enabled, bool show_value)
+static bool ui_combo(int id, Rectangle r, int *items, const char *const *labels, int count, int *sel, bool enabled, bool show_value)
 {
     focus_register(id, r, enabled);
     bool h = enabled && !blocked && hover(r);
     focus_ring(r, id, 4);
     bool is_open = pop.open && pop.id == id;
     box_border(r, 4, enabled ? T.field : T.bg, (h || is_open) ? T.accent : T.field_border);
-    char v[32] = "";
-    if (show_value && *sel >= 0 && *sel < count) snprintf(v, sizeof v, "%d GB", items[*sel]);
+    char v[96] = "";
+    if (show_value && *sel >= 0 && *sel < count) {
+        if (labels) snprintf(v, sizeof v, "%s", labels[*sel]);
+        else snprintf(v, sizeof v, "%d GB", items[*sel]);
+    }
     text_at(F_UI, v, r.x + 9, r.y + (r.height - FONTS[F_UI].px) / 2 - 1, enabled ? T.fg : T.sub);
     /* chevron */
     float cx = (r.x + r.width - 14) * S, cy = (r.y + r.height / 2) * S, k = 3.6f * S;
@@ -573,11 +585,11 @@ static bool ui_combo(int id, Rectangle r, int *items, int count, int *sel, bool 
     /* Left / Right on a focused dropdown changes the value directly (handy with a controller) */
     if (show_focus && focus_id == id && (in.nav == NAV_LEFT || in.nav == NAV_RIGHT)) {
         int ns = *sel + (in.nav == NAV_RIGHT ? 1 : -1);
-        if (ns >= 0 && ns < count) { *sel = ns; changed = true; }
+        if (ns >= 0 && ns < count) { *sel = ns; changed = true; pzlog("Dropdown %d changed with %s to index %d", id, in.nav == NAV_RIGHT ? "Right" : "Left", ns); }
         in.nav = NAV_NONE;
     }
     if (clicked(id, r, enabled)) {
-        pop = (Popup){ .open = true, .id = id, .r = r, .items = items, .count = count, .sel = sel,
+        pop = (Popup){ .open = true, .id = id, .r = r, .items = items, .labels = labels, .count = count, .sel = sel,
                        .hot = *sel < 0 ? 0 : *sel };
         int vis = count < POP_MAX ? count : POP_MAX;
         pop.scroll = pop.hot - vis / 2;
@@ -615,6 +627,7 @@ static void popup_input(void)
     }
     if (choose) {
         if (*pop.sel != pop.hot) { *pop.sel = pop.hot; pop.changed = true; }
+        pzlog("Dropdown %d: chose index %d", pop.id, pop.hot);
         pop.open = false;
     }
     if (in.back) pop.open = false;
@@ -633,8 +646,9 @@ static void popup_draw(void)
         Rectangle ir = R(pr.x + 2, pr.y + 2 + k * POP_ITEM_H, pr.width - 4, POP_ITEM_H);
         bool hot = i == pop.hot;
         if (hot) rrect(ir, 3, T.accent);
-        char v[32];
-        snprintf(v, sizeof v, "%d GB", pop.items[i]);
+        char v[96];
+        if (pop.labels) snprintf(v, sizeof v, "%s", pop.labels[i]);
+        else snprintf(v, sizeof v, "%d GB", pop.items[i]);
         text_at(F_UI, v, ir.x + 8, ir.y + (POP_ITEM_H - FONTS[F_UI].px) / 2 - 1, hot ? T.on_accent : T.fg);
         if (i == *pop.sel && !hot) DrawRectangleRec(SR(R(ir.x, ir.y + 5, 3, POP_ITEM_H - 10)), T.accent);
     }
@@ -692,6 +706,7 @@ static void dialog(const char *title, DlgCb cb, int cancel_id, const char *fmt_m
     vsnprintf(dlg.msg, sizeof dlg.msg, fmt_msg, ap);
     va_end(ap);
     pop.open = false;
+    pzlog("Dialog shown: %s\n%s", dlg.title, dlg.msg);
 }
 static void dialog_button(const char *label, int id, bool primary)
 {
@@ -744,6 +759,7 @@ static void dialog_layout(Rectangle *panel, Rectangle *msg_r, Rectangle btns[], 
 
 static void dialog_finish(int id)
 {
+    for (int i = 0; i < dlg.nb; i++) if (dlg.btn[i].id == id) pzlog("Dialog \"%s\": chose \"%s\"", dlg.title, dlg.btn[i].label);
     DlgCb cb = dlg.cb;
     dlg.open = false;
     if (cb) cb(id);
@@ -895,6 +911,14 @@ static void load_values(void)
     xms_on = plan.xms == XMS_NORMAL && plan.tier >= 12;
     if (plan.tier == 200) xms_on = true;
     if (plan.xms == XMS_LOCKED_OFF) sel_xms_index = -1;
+    {
+        Buf o = {0};
+        for (int i = 0; i < plan.count; i++) buf_addf(&o, "%s%d", i ? "," : "", plan.options[i]);
+        pzlog("Game file: %s | current -Xmx %ld MB, -Xms %ld MB | tier %d, choices [%s] GB, recommended %d (%s), -Xms mode %d",
+              json_path, current_mb, current_xms_mb, plan.tier, o.s ? o.s : "", plan.recommended, plan.recommend_text, plan.xms);
+        pzlog("Steam settings: %s | memory options in Steam: \"%s\"", steam_cfg[0] ? steam_cfg : "(not found)", steam_mem ? steam_mem : "");
+        buf_free(&o);
+    }
 }
 
 /* Refresh button: read everything again, keeping the user's choices where they still apply. */
@@ -1024,6 +1048,30 @@ static void ensure_steam_closed(const char *reason, const char *skip_means, void
  * ============================================================================= */
 static int  pending_game_mode_fix;        /* 0 none, 1 = "Fix it for me" chosen, 2 = "I'll clear it myself" */
 static char pending_action[16];
+static bool steam_was_running;            /* Steam was open before the tool closed it: start it again afterwards */
+
+/* Adds one action for the Desktop Mode round trip (several can be queued: memory + ZombieBuddy) */
+static bool pending_append(const char *line)
+{
+    char *old = pending_fix_read();
+    Buf b = {0};
+    if (old && old[0]) { buf_adds(&b, old); buf_adds(&b, "\n"); }
+    buf_adds(&b, line);
+    bool ok = pending_fix_write(b.s);
+    pzlog("Queued for Desktop Mode: %s (%s)", line, ok ? "OK" : "FAILED");
+    free(old); buf_free(&b);
+    return ok;
+}
+
+/* After the tool closed Steam: open it again (Desktop Mode / Linux PCs) */
+static void reopen_steam(Buf *report)
+{
+    if (!steam_was_running || in_game_mode()) return;
+    steam_was_running = false;
+    if (is_steam_running()) return;
+    steam_start();
+    if (report) buf_adds(report, "\n\nSteam was started again.");
+}
 
 static void steam_report(bool fix_steam, Buf *out)
 {
@@ -1096,6 +1144,9 @@ static void do_save(bool fix_steam)
     buf_addf(&m, "     Maximum memory (-Xmx):   %d GB   (-Xmx%dm)\n\n", gb, gb * 1024);
     steam_report(fix_steam, &m);
     buf_addf(&m, "\n\nA backup of the original file is at:\n%s", backup);
+    pzlog("Save: wrote -Xmx %d GB, -Xms %d GB to %s; read back: -Xmx %s, -Xms %s", gb, xms, json_path, xmx_ok ? "OK" : "WRONG", xms_ok ? "OK" : "WRONG");
+    pzlog_file("Game file after save", json_path, 6000);
+    if (fix_steam) reopen_steam(&m);
     if (!(xmx_ok && xms_ok))
         buf_addf(&m, "\n\nWARNING: the file could not be fully updated (%s%snot as expected). "
                      "Please send your ProjectZomboid64.json to ComfyPlacebo so this can be fixed.",
@@ -1121,7 +1172,7 @@ static void after_save_cb(int id)
 {
     if (pending_game_mode_fix == 1) {
         if (id == B_SWITCH) {
-            if (pending_fix_write(pending_action)) {
+            if (pending_append(pending_action)) {
                 switch_to_desktop_mode();
                 quit_requested = true;
             } else {
@@ -1175,6 +1226,7 @@ static void save_after_game(void)
     pending_game_mode_fix = 0;
     if (!steam_mem || !steam_mem[0]) { do_save(false); return; }
     if (in_game_mode()) { snprintf(pending_action, sizeof pending_action, "remove"); game_mode_dialog("remove", save_with_steam); return; }
+    steam_was_running = is_steam_running();
     ensure_steam_closed("remove the memory settings from", "save without changing the Steam launch options", save_with_steam);
 }
 static void save(void) { if (selected_gb() >= MIN_ALLOC_GB || (selected_gb() > 0)) ensure_game_closed(save_after_game); }
@@ -1208,6 +1260,7 @@ static void do_restore(bool do_steam)
             buf_addf(&done, "Steam launch options restored to: %s", lo ? lo : "");
             free(lo); free(t);
         } else buf_adds(&done, "Steam launch options could not be restored.");
+        if (do_steam) reopen_steam(&done);
     }
     load_values();
     if (pending_game_mode_fix == 1) {
@@ -1234,6 +1287,7 @@ static void restore_after_game(void)
         game_mode_dialog("restore", do_restore);
         return;
     }
+    steam_was_running = is_steam_running();
     ensure_steam_closed("restore", "restore only the game file and leave the Steam launch options as they are", do_restore);
 }
 static void restore_confirm_cb(int id) { if (id == B_YES) ensure_game_closed(restore_after_game); }
@@ -1292,6 +1346,19 @@ static void copy_console(bool as_text)
     strftime(when, sizeof when, "%H:%M", localtime(&st.st_mtime));
     snprintf(console_status, sizeof console_status, "%s\n(%s, %s)",
              as_text ? "Copied console.txt as text" : "Copied console.txt", size, when);
+    pzlog("Console copied %s: %s (%zu bytes)", as_text ? "as text" : "as file", copy, len);
+}
+
+/* F12 or the controller's View / Select button copies the log as text */
+static void copy_log(void)
+{
+    size_t len = 0;
+    char *t = read_file(log_path(), &len);
+    bool ok = t && clip_set_text(t, len);
+    free(t);
+    snprintf(console_status, sizeof console_status, ok ? "Copied the log as text\n(%zu KB)" : "Could not copy the log", len / 1024);
+    console_status_error = !ok;
+    pzlog("Copy log: %s", ok ? "OK" : "FAILED");
 }
 
 static void open_kofi(void)
@@ -1483,7 +1550,7 @@ static void maybe_ask_add_to_steam(void)
  *  Finishing a Game Mode "Fix it for me" (runs once, automatically, in Desktop Mode)
  * ============================================================================= */
 static int return_left;
-static char finish_action[16];
+static char finish_actions[2048];
 
 static void finish_return_tick(void)
 {
@@ -1494,29 +1561,45 @@ static void finish_return_tick(void)
     }
     dlg.tick = NULL;
     dlg.open = false;
+    pzlog("Returning to Game Mode (timer)");
     switch_to_game_mode();
     quit_requested = true;
 }
 static void finish_return_cb(int id)
 {
-    if (id == B_SWITCH) { switch_to_game_mode(); quit_requested = true; }
+    if (id == B_SWITCH) { pzlog("Returning to Game Mode (button)"); switch_to_game_mode(); quit_requested = true; }
+    else steam_start();          /* staying in Desktop Mode: Steam back on */
 }
 static void finish_do(bool steam_closed)
 {
     Buf m = {0};
-    bool restore = !strcmp(finish_action, "restore");
     check_steam();
-    if (!steam_closed) buf_adds(&m, "Steam's launch options were NOT changed (Steam was still running).");
-    else if (restore) {
-        if (steam_restore_from_backup(steam_cfg)) buf_adds(&m, "Steam's launch options for Project Zomboid were restored.");
-        else buf_adds(&m, "Nothing to restore in Steam's launch options.");
-    } else if (steam_mem && steam_mem[0]) {
-        char b[PATH_MAX] = "";
-        if (steam_remove_memory_args(steam_cfg, b, sizeof b))
-            buf_addf(&m, "Removed %s from Steam's launch options for Project Zomboid.\nSteam backup: %s", steam_mem, b);
-        else buf_addf(&m, "Could not change Steam's launch options. Remove %s yourself: Project Zomboid > Properties > "
-                          "General > Launch Options.", steam_mem);
-    } else buf_adds(&m, "Steam's launch options for Project Zomboid contain no memory settings. Nothing to change.");
+    char *copy = strdup(finish_actions), *save = NULL;
+    for (char *a = strtok_r(copy, "\n", &save); a; a = strtok_r(NULL, "\n", &save)) {
+        pzlog("Desktop Mode step: %s (Steam closed: %s)", a, steam_closed ? "yes" : "no");
+        if (m.len) buf_adds(&m, "\n\n");
+        if (!steam_closed) { buf_addf(&m, "Not done (Steam was still running): %s", a); continue; }
+        if (!strcmp(a, "restore")) {
+            if (steam_restore_from_backup(steam_cfg)) buf_adds(&m, "Steam's launch options for Project Zomboid were restored.");
+            else buf_adds(&m, "Nothing to restore in Steam's launch options.");
+        } else if (!strcmp(a, "remove")) {
+            if (steam_mem && steam_mem[0]) {
+                char b[PATH_MAX] = "";
+                if (steam_remove_memory_args(steam_cfg, b, sizeof b))
+                    buf_addf(&m, "Removed %s from Steam's launch options for Project Zomboid.", steam_mem);
+                else buf_addf(&m, "Could not remove %s from Steam's launch options.", steam_mem);
+                check_steam();
+            } else buf_adds(&m, "Steam's launch options contain no memory settings. Nothing to change.");
+        } else if (!strncmp(a, "zb-steam-add ", 13)) {
+            int rc = zb_steam_set(steam_cfg, a + 13);
+            buf_addf(&m, rc >= 0 ? "ZombieBuddy %s Steam's launch options." : "Could not add ZombieBuddy to Steam's launch options.",
+                     rc == 1 ? "was added to" : "was already in");
+        } else if (!strcmp(a, "zb-steam-remove")) {
+            int rc = zb_steam_set(steam_cfg, NULL);
+            buf_adds(&m, rc >= 0 ? "ZombieBuddy is no longer in Steam's launch options." : "Could not change Steam's launch options.");
+        }
+    }
+    free(copy);
     load_values();
     return_left = 10;
     buf_addf(&m, "\n\nReturning to Game Mode in %d seconds...", return_left);
@@ -1533,15 +1616,15 @@ static void finish_wait_tick(void)
     if (--finish_wait > 0) return;
     dlg.tick = NULL;
     dlg.open = false;
-    ensure_steam_closed(!strcmp(finish_action, "restore") ? "restore" : "remove the memory settings from",
-                        "leave the Steam launch options as they are", finish_do);
+    ensure_steam_closed("change", "leave the Steam launch options as they are", finish_do);
     if (dlg.open && dlg.cb == steam_guard_cb) steam_guard_cb(B_CLOSE_STEAM);   /* start closing right away */
 }
 static void start_finish(void)
 {
     char *a = pending_fix_read();
-    snprintf(finish_action, sizeof finish_action, "%s", a ? a : "remove");
+    snprintf(finish_actions, sizeof finish_actions, "%s", a ? a : "remove");
     free(a);
+    pzlog("Finishing Game Mode round trip, actions:\n%s", finish_actions);
     pending_fix_clear();          /* runs once, even if something goes wrong */
     dialog("PZ Memory Tool - Steam fix", NULL, 0,
            "Finishing the Steam fix from Game Mode.\n\nClosing Steam to change Project Zomboid's launch options...");
@@ -1549,10 +1632,328 @@ static void start_finish(void)
     dialog_ticker(finish_wait_tick);
 }
 
+/* =============================================================================
+ *  ZombieBuddy window
+ * ============================================================================= */
+static struct {
+    bool open, adv;
+    int  channel;              /* 0 stable, 1 beta */
+    bool do_json, do_steam;
+    int  policy, verb;
+    ZbStatus st;
+    double next_scan;
+    int  saved_focus;
+    bool delete_approvals;
+    Buf  report;
+} zb;
+static ZbStatus zb_main;       /* for the status line in the main window */
+static const char *const POLICY_LABELS[] = { "Ask me for each new mod (recommended)", "Only load mods I already approved" };
+static const char *const VERB_LABELS[]   = { "Normal", "Debug (patch details)", "Trace (everything)" };
+static int policy_items[2] = { 0, 1 }, verb_items[3] = { 0, 1, 2 };
+
+static void zb_status_text(const ZbStatus *st, char *out, size_t n)
+{
+    const char *ws = st->ws_found[0] ? st->ws_ver[0] : st->ws_found[1] ? st->ws_ver[1] : "";
+    bool any = st->jar_installed && (st->in_json || st->in_steam);
+    if (!any && !st->jar_installed) snprintf(out, n, "Not installed");
+    else if (!any) snprintf(out, n, "Copied, but not switched on");
+    else if (ws[0] && st->inst_ver[0] && version_newer(ws, st->inst_ver)) snprintf(out, n, "Installed v%s (v%s on Workshop)", st->inst_ver, ws);
+    else if (st->inst_ver[0]) snprintf(out, n, "Installed v%s", st->inst_ver);
+    else snprintf(out, n, "Installed");
+}
+
+static void zb_rescan(void) { zb_scan(json_path, steam_cfg, &zb.st); }
+
+static void zb_open_window(void)
+{
+    pzlog("Opening ZombieBuddy window");
+    zb_rescan();
+    zb.open = true;
+    zb.channel = zb.st.ws_found[0] || !zb.st.ws_found[1] ? 0 : 1;
+    zb.do_json = true;
+    zb.do_steam = false;      /* Linux reads the game file, so Steam's launch options are never needed */
+    zb.policy = strstr(zb.st.json_arg, "policy=deny-new") || strstr(zb.st.steam_opts, "policy=deny-new") ? 1 : 0;
+    const char *v = strstr(zb.st.json_arg, "verbosity=");
+    zb.verb = v ? atoi(v + 10) : 0;
+    if (zb.verb < 0 || zb.verb > 2) zb.verb = 0;
+    zb.adv = zb.policy || zb.verb;
+    zb.next_scan = GetTime() + 2;
+    zb.saved_focus = focus_id;
+    active_layer = 1;
+    focus_id = ID_ZB_INSTALL;
+}
+static void zb_close_window(void)
+{
+    pzlog("Closing ZombieBuddy window");
+    zb.open = false;
+    active_layer = 0;
+    focus_id = zb.saved_focus;
+    zb_scan(json_path, steam_cfg, &zb_main);
+}
+
+static void zb_report_dialog(void)
+{
+    zb_rescan();
+    zb_scan(json_path, steam_cfg, &zb_main);
+    char st[128];
+    zb_status_text(&zb.st, st, sizeof st);
+    buf_addf(&zb.report, "\n\nZombieBuddy now: %s.", st);
+    dialog("PZ Memory Tool - ZombieBuddy", NULL, B_OK, "%s", zb.report.s);
+    dialog_button("OK", B_OK, true);
+    dlg.wide = true;
+    buf_free(&zb.report);
+}
+
+/* ---- Install ---- */
+static char zb_arg[128];
+static void zb_steam_step(bool closed)
+{
+    if (!closed) buf_adds(&zb.report, "\nSteam launch options: skipped (Steam was still running).");
+    else {
+        bool add = zb_arg[0] != 0;
+        int rc = zb_steam_set(steam_cfg, add ? zb_arg : NULL);
+        buf_addf(&zb.report, "\nSteam launch options: %s", rc == 1 ? (add ? "ZombieBuddy added." : "ZombieBuddy removed.") :
+                                                            rc == 0 ? (add ? "already set." : "nothing to remove.") : "could NOT be changed.");
+        reopen_steam(&zb.report);
+    }
+    zb_report_dialog();
+}
+static void zb_gm_cb(int id)
+{
+    if (id == B_SWITCH) {
+        char line[200];
+        snprintf(line, sizeof line, "zb-steam-%s%s%s", zb_arg[0] ? "add" : "remove", zb_arg[0] ? " " : "", zb_arg);
+        if (pending_append(line)) {
+            buf_adds(&zb.report, "\nSteam launch options: will be changed in Desktop Mode.");
+            pzlog("%s", zb.report.s);
+            switch_to_desktop_mode();
+            quit_requested = true;
+            return;
+        }
+        buf_adds(&zb.report, "\nSteam launch options: could not prepare the Desktop Mode step.");
+    } else buf_adds(&zb.report, "\nSteam launch options: skipped.");
+    zb_report_dialog();
+}
+static void zb_steam_part(void)
+{
+    if (in_game_mode()) {
+        dialog("PZ Memory Tool - Game Mode", zb_gm_cb, B_SKIP,
+               "Steam can't be closed in Game Mode, so Steam's launch options can only be changed in Desktop Mode.\n\n"
+               "Switch to Desktop Mode: changes them there and comes back to Game Mode by itself (about a minute).\n"
+               "Skip: leave Steam's launch options as they are.");
+        if (can_switch_session()) dialog_button("Switch to Desktop Mode", B_SWITCH, true);
+        dialog_button("Skip", B_SKIP, !can_switch_session());
+        return;
+    }
+    steam_was_running = is_steam_running();
+    ensure_steam_closed(zb_arg[0] ? "add ZombieBuddy to" : "remove ZombieBuddy from",
+                        "skip the Steam launch options", zb_steam_step);
+}
+
+static void zb_install_after_game(void)
+{
+    buf_free(&zb.report);
+    char msg[512];
+    zb_rescan();
+    bool ok = zb_copy_jar(&zb.st, zb.channel, msg, sizeof msg);
+    buf_addf(&zb.report, "%s", msg);
+    if (!ok) { zb_report_dialog(); return; }
+    if (zb.do_json) {
+        int rc = zb_json_set(json_path, zb_arg);
+        buf_addf(&zb.report, "\nGame file: %s", rc == 1 ? "ZombieBuddy added." : rc == 0 ? "already set." : "could NOT be changed.");
+        pzlog_file("Game file after ZombieBuddy install", json_path, 6000);
+    } else if (zb.st.in_json) {
+        zb_json_set(json_path, NULL);
+        buf_adds(&zb.report, "\nGame file: ZombieBuddy removed (not ticked).");
+    }
+    zb_report_dialog();
+}
+static void zb_install_confirm_cb(int id) { if (id == B_YES) ensure_game_closed(zb_install_after_game); }
+
+static void zb_install(void)
+{
+    zb_agent_arg(zb.policy, zb.verb, zb_arg, sizeof zb_arg);
+    Buf m = {0};
+    buf_addf(&m, "ZombieBuddy will make these changes:\n\n"
+                 "  - Copy ZombieBuddy.jar%s%s (Workshop%s) into the game folder:\n    %s\n",
+             zb.st.ws_ver[zb.channel][0] ? " v" : "", zb.st.ws_ver[zb.channel], zb.channel ? ", beta" : "", zb.st.game_dir);
+    if (zb.do_json) buf_addf(&m, "  - Game file: add %s\n", zb_arg);
+    dialog("PZ Memory Tool - Install ZombieBuddy", zb_install_confirm_cb, B_NO, "%s", m.s);
+    dialog_button("Install", B_YES, true);
+    dialog_button("Cancel", B_NO, false);
+    dlg.wide = true;
+    buf_free(&m);
+}
+
+/* ---- Uninstall ---- */
+static void zb_uninstall_after_game(void)
+{
+    buf_free(&zb.report);
+    char msg[256];
+    zb_rescan();
+    zb_remove_files(&zb.st, msg, sizeof msg);
+    buf_adds(&zb.report, msg);
+    int rc = zb_json_set(json_path, NULL);
+    buf_addf(&zb.report, "\nGame file: %s", rc == 1 ? "ZombieBuddy removed." : rc == 0 ? "nothing to remove." : "could NOT be changed.");
+    if (zb.delete_approvals)
+        buf_addf(&zb.report, "\nSaved mod approvals: %s", zb_delete_approvals() ? "deleted." : "could NOT be deleted.");
+    if (zb.st.in_steam) { zb_arg[0] = 0; zb_steam_part(); return; }
+    zb_report_dialog();
+}
+static void zb_uninstall_cb(int id)
+{
+    if (id != B_YES && id != B_NEVER) return;
+    zb.delete_approvals = id == B_NEVER;
+    ensure_game_closed(zb_uninstall_after_game);
+}
+static void zb_uninstall(void)
+{
+    Buf m = {0};
+    buf_adds(&m, "This removes ZombieBuddy:\n\n  - ZombieBuddy.jar from the game folder\n");
+    if (zb.st.in_json) buf_addf(&m, "  - Game file: remove %s\n", zb.st.json_arg);
+    if (zb.st.in_steam) buf_adds(&m, "  - Steam launch options: remove ZombieBuddy\n");
+    buf_adds(&m, "\nMods that need ZombieBuddy will stop working. Your other mods and settings stay as they are.");
+    if (zb.st.approvals_exist)
+        buf_adds(&m, "\n\n\"Uninstall + approvals\" also deletes the list of Java mods you allowed or blocked (~/.zombie_buddy).");
+    dialog("PZ Memory Tool - Uninstall ZombieBuddy", zb_uninstall_cb, B_NO, "%s", m.s);
+    dialog_button("Uninstall", B_YES, true);
+    if (zb.st.approvals_exist) dialog_button("Uninstall + approvals", B_NEVER, false);
+    dialog_button("Cancel", B_NO, false);
+    dlg.wide = true;
+    buf_free(&m);
+}
+
+/* ---- Drawing the window ---- */
+static void draw_tick(float x, float y, Color c)
+{
+    DrawLineEx((Vector2){ (x) * S, (y + 7) * S }, (Vector2){ (x + 4.5f) * S, (y + 11.5f) * S }, 2.2f * S, c);
+    DrawLineEx((Vector2){ (x + 4.5f) * S, (y + 11.5f) * S }, (Vector2){ (x + 13) * S, (y + 2) * S }, 2.2f * S, c);
+}
+static void draw_arrow(float x, float y, bool open, Color c)
+{
+    if (open) DrawTriangle((Vector2){ x * S, (y + 3) * S }, (Vector2){ (x + 5) * S, (y + 9) * S }, (Vector2){ (x + 10) * S, (y + 3) * S }, c);
+    else DrawTriangle((Vector2){ (x + 2) * S, (y + 1) * S }, (Vector2){ (x + 2) * S, (y + 11) * S }, (Vector2){ (x + 8) * S, (y + 6) * S }, c);
+}
+
+static void zb_draw(void)
+{
+    if (!zb.open) return;
+    if (GetTime() >= zb.next_scan && !dlg.open) {
+        bool had = zb.st.ws_found[0] || zb.st.ws_found[1];
+        zb_rescan();
+        zb.next_scan = GetTime() + 2;
+        if (!had && (zb.st.ws_found[0] || zb.st.ws_found[1])) {
+            pzlog("Workshop download appeared");
+            zb.channel = zb.st.ws_found[0] ? 0 : 1;
+        }
+    }
+    draw_layer = 1;
+    bool gm = in_game_mode();
+    float win_w = GetScreenWidth() / S, win_h = GetScreenHeight() / S;
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), (Color){ 0, 0, 0, 110 });
+
+    float pw = 600, px = (win_w - pw) / 2;
+    static float content_h = 420;           /* measured from the previous frame */
+    float ph = content_h;
+    float py = fmaxf(6, (win_h - ph) / 2);
+    Rectangle panel = R(px, py, pw, ph);
+    rrect(R(px + 3, py + 5, pw, ph), 8, (Color){ 0, 0, 0, 80 });
+    box_border(panel, 8, T.bg, T.btn_border);
+    float x = px + 22, w = pw - 44, y = py + 16;
+
+    text_at(F_DLG_B, "ZombieBuddy", x, y, T.fg);
+    y += 28;
+    y += text_box(F_SMALL, "ZombieBuddy lets Project Zomboid load Java mods. It's made by Zed "
+                           "(github.com/zed-0xff/ZombieBuddy), not by ComfyPlacebo. Java mods have full access to your "
+                           "computer, so ZombieBuddy asks before it loads each new one: only allow mods you trust.",
+                  R(x, y, w, 60), T.sub, AL_LEFT, 0) + 12;
+
+    /* Step 1: Workshop */
+    bool have = zb.st.ws_found[0] || zb.st.ws_found[1];
+    text_at(F_BTN_B, "1.  Subscribe to ZombieBuddy on the Steam Workshop", x, y, T.fg);
+    y += 24;
+    if (have) {
+        draw_tick(x + 2, y + 1, T.note);
+        char t[160];
+        snprintf(t, sizeof t, "Subscribed and downloaded%s%s%s", zb.st.ws_ver[zb.channel][0] ? " (v" : "",
+                 zb.st.ws_ver[zb.channel], zb.st.ws_ver[zb.channel][0] ? ")" : "");
+        text_at(F_UI, t, x + 22, y, T.note);
+        if (zb.st.ws_found[0] && zb.st.ws_found[1]) {
+            /* both subscribed: choose which one to install */
+            bool a = zb.channel == 0, b = zb.channel == 1;
+            char la[64], lb[64];
+            snprintf(la, sizeof la, "Stable v%s", zb.st.ws_ver[0]);
+            snprintf(lb, sizeof lb, "Beta v%s", zb.st.ws_ver[1]);
+            if (ui_checkbox(ID_ZB_STABLE, R(x + 300, y - 3, 120, 24), la, &a, true)) zb.channel = 0;
+            if (ui_checkbox(ID_ZB_BETA, R(x + 430, y - 3, 120, 24), lb, &b, true)) zb.channel = 1;
+        }
+        y += 26;
+    } else {
+        text_box(F_UI, "Not subscribed yet. Subscribe in Steam: this window notices by itself when Steam has downloaded it.",
+                 R(x, y, w - 190, 40), T.warn, AL_LEFT, 0);
+        if (ui_button(ID_ZB_SUB, R(x + w - 180, y, 180, 32), "Subscribe on Workshop", true, BTN_PRIMARY, F_BTN_B))
+            steam_open_url("steam://url/CommunityFilePage/" ZB_MOD_ID);
+        y += 44;
+    }
+    y += 8;
+
+    /* Step 2: on Linux the game file is all it takes (the game reads it on every start) */
+    text_at(F_BTN_B, "2.  Install", x, y, T.fg);
+    y += 24;
+    zb.do_json = true;
+    y += text_box(F_UI, "Copies ZombieBuddy into the game folder and switches it on in the game file "
+                        "(ProjectZomboid64.json). Steam doesn't need to be closed.", R(x, y, w, 40), T.fg, AL_LEFT, 0) + 4;
+    if (zb.st.in_steam)
+        y += text_box(F_SUB, "Steam's launch options also contain ZombieBuddy. That isn't needed on Linux and you can "
+                             "remove it (Project Zomboid > Properties > Launch Options). Uninstall removes it too.",
+                      R(x, y, w, 36), T.warn, AL_LEFT, 0);
+    (void)gm;
+    y += 12;
+
+    /* Current state */
+    char st[128], line[256];
+    zb_status_text(&zb.st, st, sizeof st);
+    snprintf(line, sizeof line, "Now: %s%s%s", st,
+             zb.st.in_json ? "  |  in game file" : "", zb.st.in_steam ? "  |  also in Steam launch options" : "");
+    text_at(F_UI, line, x, y, T.fg);
+    y += 30;
+
+    /* Advanced (expands the window) */
+    float aw = text_w(F_UI, "Advanced") + 20;
+    Rectangle ar = R(x - 2, y - 2, aw + 4, 22);
+    focus_register(ID_ZB_ADV, ar, true);
+    focus_ring(ar, ID_ZB_ADV, 3);
+    draw_arrow(x, y + 3, zb.adv, T.fg);
+    text_at(F_UI, "Advanced", x + 16, y, (!blocked && hover(ar)) ? T.accent : T.fg);
+    if (clicked(ID_ZB_ADV, ar, true)) { zb.adv = !zb.adv; pzlog("Advanced %s", zb.adv ? "opened" : "closed"); }
+    y += 28;
+    if (zb.adv) {
+        text_at(F_UI, "Approval policy:", x + 16, y + 5, T.fg);
+        ui_combo(ID_ZB_POLICY, R(x + 150, y, 300, 28), policy_items, POLICY_LABELS, 2, &zb.policy, true, true);
+        y += 36;
+        text_at(F_UI, "Log detail:", x + 16, y + 5, T.fg);
+        ui_combo(ID_ZB_VERB, R(x + 150, y, 300, 28), verb_items, VERB_LABELS, 3, &zb.verb, true, true);
+        y += 36;
+        text_at(F_SUB, "These go after the ZombieBuddy option, e.g. -javaagent:ZombieBuddy.jar=policy=deny-new", x + 16, y, T.sub);
+        y += 22;
+    }
+
+    /* Buttons */
+    content_h = (y - py) + 14 + 34 + 18;
+    bool installed = zb.st.jar_installed || zb.st.in_json || zb.st.in_steam;
+    float by = py + ph - 18 - 34;
+    bool can_install = have && json_path;
+    if (ui_button(ID_ZB_INSTALL, R(x, by, 150, 34), installed ? "Install / Update" : "Install", can_install, BTN_PRIMARY, F_BTN_B)) zb_install();
+    if (ui_button(ID_ZB_UNINSTALL, R(x + 160, by, 130, 34), "Uninstall", installed, BTN_NORMAL, F_UI)) zb_uninstall();
+    if (ui_button(ID_ZB_CANCEL, R(px + pw - 22 - 110, by, 110, 34), "Close", true, BTN_NORMAL, F_UI)) zb_close_window();
+    draw_layer = 0;
+}
+
 static void after_found(void)
 {
     ui_ready = true;
     load_values();
+    zb_scan(json_path, steam_cfg, &zb_main);
     if (finish_mode) start_finish();
     else maybe_ask_add_to_steam();
 }
@@ -1561,7 +1962,8 @@ static void after_found(void)
  *  The main window
  * ============================================================================= */
 static float combo_x, rec_x, rec_y, rec_w, box_x, box_y, box_w, client_h;
-static float y_warn, y_note, y_kofi, y_save;
+static float y_warn, y_note, y_kofi, y_save, zb_box_y, copier_h;
+#define ZB_BOX_H 94
 static bool  button_below;
 
 static void compute_layout(void)
@@ -1580,10 +1982,13 @@ static void compute_layout(void)
     y_warn = y; y += 82;
     y_note = y; y += 44;
     y_kofi = y; y += 30;
-    float region_top = 237, region_bottom = y - 6;
+    float region_bottom = y - 6;
     box_x = fminf(MAX_BOX_X, fmaxf(435, left_right + 15));
     box_w = W - 20 - box_x;
-    box_y = region_top + (region_bottom - region_top - BOX_H) / 2;
+    /* ZombieBuddy box on top (below the Steam lines), Console Copier under it */
+    zb_box_y = 209;
+    box_y = zb_box_y + ZB_BOX_H + 6;
+    copier_h = region_bottom - box_y;
     y_save = y;
     client_h = y + 34 + 15;
 }
@@ -1652,14 +2057,14 @@ static void draw_main(void)
         bool chk_enabled = plan.xms == XMS_NORMAL;
         bool v = xms_on && chk_enabled;
         if (ui_checkbox(ID_CHK, R(15, y + 1, combo_x - 17, row_h), "Minimum allocation (-Xms):", &v, chk_enabled)) xms_on = v;
-        ui_combo(ID_XMS, R(combo_x, y, 85, 27), xms_items, xms_count, &sel_xms_index, chk_enabled && xms_on,
+        ui_combo(ID_XMS, R(combo_x, y, 85, 27), xms_items, NULL, xms_count, &sel_xms_index, chk_enabled && xms_on,
                  plan.xms == XMS_NORMAL);
     }
     y += 36;
 
     /* Maximum (-Xmx) */
     text_at(F_UI, "Maximum allocation (-Xmx):", 15, y + 3 + 1, T.fg);
-    if (ui_combo(ID_GB, R(combo_x, y, 85, 27), plan.options, plan.count, &sel_gb_index, !locked, true)) update_xms_options();
+    if (ui_combo(ID_GB, R(combo_x, y, 85, 27), plan.options, NULL, plan.count, &sel_gb_index, !locked, true)) update_xms_options();
     if (ui_button(ID_REC, R(rec_x, rec_y, rec_w, 30), "Use recommended", !locked, BTN_NORMAL, F_UI)) {
         int i = index_of(plan.options, plan.count, plan.recommended);
         if (i >= 0) { sel_gb_index = i; update_xms_options(); }
@@ -1675,18 +2080,30 @@ static void draw_main(void)
 
     if (ui_link(ID_KOFI, R(15, y_kofi, LEFT_W, 24), "Support ComfyPlacebo on Ko-fi: ko-fi.com/comfyplacebo")) open_kofi();
 
+    /* ZombieBuddy */
+    Rectangle zr = R(box_x, zb_box_y, box_w, ZB_BOX_H);
+    draw_titled_box(zr, "ZombieBuddy");
+    char zst[128];
+    zb_status_text(&zb_main, zst, sizeof zst);
+    text_box(F_SUB, zst, R(zr.x + 8, zr.y + 24, box_w - 16, 18), T.sub, AL_CENTER, 0);
+    bool zb_inst = zb_main.jar_installed || zb_main.in_json || zb_main.in_steam;
+    float zw = box_w - 24;
+    if (ui_button(ID_ZB_OPEN, R(zr.x + 12, zr.y + 46, zw, 34), zb_inst ? "ZombieBuddy options..." : "Install ZombieBuddy...",
+                  ui_ready, BTN_NORMAL, F_UI))
+        zb_open_window();
+
     /* Console Copier */
-    Rectangle bx = R(box_x, box_y, box_w, BOX_H);
+    float BH = copier_h;
+    Rectangle bx = R(box_x, box_y, box_w, BH);
     draw_titled_box(bx, "Console Copier");
-    text_box(F_SMALL, "Copies Project Zomboid's console.txt log to your clipboard, as a file or as text.\n\n"
-                      "Paste it into Discord, a message or a folder with right click or Ctrl+V.",
-             R(bx.x + 14, bx.y + 30, box_w - 28, 122), T.fg, AL_CENTER, 0);
-    text_box(F_SUB, console_status, R(bx.x + 10, bx.y + BOX_H - 154, box_w - 20, 54),
+    text_box(F_SMALL, "Copies console.txt to your clipboard as a file or as text. Paste it with right click or Ctrl+V.",
+             R(bx.x + 12, bx.y + 28, box_w - 24, 74), T.fg, AL_CENTER, 0);
+    text_box(F_SUB, console_status, R(bx.x + 8, bx.y + BH - 146, box_w - 16, 50),
              console_status_error ? T.warn : T.note, AL_CENTER, 2);
     float copy_w = fminf(130, box_w - 24);
-    if (ui_button(ID_COPY, R(bx.x + (box_w - copy_w) / 2, bx.y + BOX_H - 94, copy_w, 34), "Copy Console", true, BTN_NORMAL, F_UI))
+    if (ui_button(ID_COPY, R(bx.x + (box_w - copy_w) / 2, bx.y + BH - 92, copy_w, 34), "Copy Console", true, BTN_NORMAL, F_UI))
         copy_console(false);
-    if (ui_button(ID_COPYTEXT, R(bx.x + (box_w - copy_w) / 2, bx.y + BOX_H - 52, copy_w, 34), "Copy as text", true, BTN_NORMAL, F_UI))
+    if (ui_button(ID_COPYTEXT, R(bx.x + (box_w - copy_w) / 2, bx.y + BH - 50, copy_w, 34), "Copy as text", true, BTN_NORMAL, F_UI))
         copy_console(true);
 
     /* Bottom buttons */
@@ -1726,12 +2143,35 @@ int main(int argc, char **argv)
     }
     if (finish_mode && !pending_fix_exists()) { pending_fix_clear(); return 0; }   /* nothing left to do */
 
+    log_init();
+    pzlog("PZ Memory Tool %s (build %s)", PZMT_VERSION, PZMT_BUILD);
+    for (int i = 0; i < argc; i++) pzlog("  argv[%d] = %s", i, argv[i]);
+    {
+        const char *envs[] = { "HOME", "USER", "XDG_CURRENT_DESKTOP", "XDG_SESSION_TYPE", "XDG_SESSION_DESKTOP", "DISPLAY",
+                               "WAYLAND_DISPLAY", "GAMESCOPE_WAYLAND_DISPLAY", "SteamGamepadUI", "SteamDeck", "SteamOS",
+                               "SteamGameId", "SteamAppId", "SteamClientLaunch", "LANG", "PATH" };
+        for (size_t i = 0; i < sizeof envs / sizeof *envs; i++) { const char *v = getenv(envs[i]); if (v) pzlog("  env %s=%s", envs[i], v); }
+        char *os = read_file("/etc/os-release", NULL);
+        if (os) { char *p = strstr(os, "PRETTY_NAME="); if (p) { p[strcspn(p, "\n")] = 0; pzlog("  %s", p); } free(os); }
+        const char *un[] = { "uname", "-a", NULL };
+        char *u = run_capture(un);
+        if (u) { pzlog("  %s", u); free(u); }
+        pzlog("  Game Mode: %s | steamos-session-select: %s | steamos-add-to-steam: %s | steam command: %s",
+              in_game_mode() ? "YES" : "no", can_switch_session() ? "yes" : "no", steam_add_to_steam_supported() ? "yes" : "no",
+              command_exists("steam") ? "yes" : "no");
+        pzlog("  Steam running: %s | Project Zomboid running: %s", is_steam_running() ? "yes" : "no", is_game_running() ? "yes" : "no");
+        char cd[1024]; config_dir(cd, sizeof cd);
+        char *pend = pending_fix_read();
+        pzlog("  Settings folder: %s | pending Desktop Mode actions: %s", cd, pend ? pend : "none");
+        free(pend);
+    }
+
     srand((unsigned)time(NULL));
     banner_init();
 
     SetConfigFlags(FLAG_MSAA_4X_HINT | FLAG_VSYNC_HINT);
     SetTraceLogLevel(LOG_WARNING);
-    InitWindow(W, 618, "PZ Memory Tool v" PZMT_VERSION " - Now with Console copier!!");
+    InitWindow(W, 618, "PZ Memory Tool v" PZMT_VERSION " - Now with ZombieBuddy installer!!");
     SetExitKey(KEY_NULL);
 
     /* Display scaling (HiDPI): from the desktop, or PZMT_SCALE=1.5 to force */
@@ -1748,6 +2188,10 @@ int main(int argc, char **argv)
     int mon = GetCurrentMonitor();
     SetWindowPosition((GetMonitorWidth(mon) - (int)(W * S)) / 2, (GetMonitorHeight(mon) - (int)(client_h * S)) / 2);
     set_icon();
+    pzlog("Display: scale %.2f, window %dx%d, monitor %dx%d (%s), theme %s, bg #%02x%02x%02x accent #%02x%02x%02x",
+          S, GetScreenWidth(), GetScreenHeight(), GetMonitorWidth(mon), GetMonitorHeight(mon), GetMonitorName(mon),
+          T.dark ? "dark" : "light", T.bg.r, T.bg.g, T.bg.b, T.accent.r, T.accent.g, T.accent.b);
+    pzlog("Fonts: family \"%s\", regular loaded: %s, bold: %s", kde_font_family, FONTS[F_UI].loaded ? "yes" : "NO (fallback)", FONTS[F_BTN_B].loaded ? "yes" : "NO");
     SetTargetFPS(50);
     install_input_hooks();
     clip_init();
@@ -1767,13 +2211,26 @@ int main(int argc, char **argv)
         job_poll();
         dialog_input();
         if (!dlg.open) popup_input();
+        if (in.copylog || gamepad_pressed(GAMEPAD_BUTTON_MIDDLE_LEFT)) copy_log();
+        for (int g = 0; g < 4; g++) {
+            static bool seen[4];
+            if (IsGamepadAvailable(g) && !seen[g]) { seen[g] = true; pzlog("Controller %d connected: %s", g, GetGamepadName(g)); }
+        }
+        {
+            static int last_kind = -1;   /* log which kind of input is used, when it changes */
+            int kind = in.mouse_pressed ? 0 : (in.nav || in.act || in.back || in.tab) ? (gamepad_dir() || pad_dir_held ||
+                       gamepad_pressed(GAMEPAD_BUTTON_RIGHT_FACE_DOWN) || gamepad_pressed(GAMEPAD_BUTTON_RIGHT_FACE_RIGHT) ? 2 : 1) : -1;
+            if (kind >= 0 && kind != last_kind) { last_kind = kind; pzlog("Input now: %s", kind == 0 ? "mouse/touch" : kind == 1 ? "keyboard" : "controller"); }
+        }
+        if (!blocked && zb.open && in.back) { zb_close_window(); in.back = false; blocked = true; }
         if (!blocked) {
             if (in.tab) focus_tab(in.tab);
-            bool on_combo = (focus_id == ID_GB || focus_id == ID_XMS) && focus_items[focus_id].enabled;
+            bool on_combo = (focus_id == ID_GB || focus_id == ID_XMS || focus_id == ID_ZB_POLICY || focus_id == ID_ZB_VERB) &&
+                            focus_items[focus_id].enabled;
             bool lr = in.nav == NAV_LEFT || in.nav == NAV_RIGHT;
             /* Left / Right on a dropdown change its value (handled by the dropdown itself) */
             if (in.nav && show_focus && !(on_combo && lr)) focus_id = focus_move_dir(in.nav);
-            if (!focus_items[focus_id].used || !focus_items[focus_id].enabled) focus_tab(1);
+            if (!focusable(focus_id)) focus_tab(1);
         }
 
         while (GetTime() - banner_t >= 0.04) { banner_step(); banner_t += 0.04; }
@@ -1782,7 +2239,11 @@ int main(int argc, char **argv)
         ClearBackground(T.bg);
         bool keep_blocked = blocked;
         /* when the list just closed this frame, don't let the same key press a control underneath */
+        draw_layer = 0;
+        blocked = keep_blocked || zb.open;
         draw_main();
+        blocked = keep_blocked;
+        zb_draw();
         blocked = keep_blocked;
         popup_draw();
         dialog_draw();
@@ -1795,6 +2256,7 @@ int main(int argc, char **argv)
         }
     }
     if (job.running) { job.cancel = true; pthread_join(job.th, NULL); }
+    pzlog("Closing the tool");
     CloseWindow();
     clip_shutdown();
     return 0;

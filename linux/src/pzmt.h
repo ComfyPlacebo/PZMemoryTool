@@ -14,7 +14,7 @@
 #include <stddef.h>
 
 #ifndef PZMT_VERSION
-#define PZMT_VERSION "1.1.0-preview"
+#define PZMT_VERSION "1.2.0-preview"
 #endif
 #ifndef PZMT_BUILD
 #define PZMT_BUILD "0"          /* GitHub Actions sets this to the run number */
@@ -122,6 +122,48 @@ bool   pending_fix_write(const char *action);                     /* "remove" or
 char  *pending_fix_read(void);                                   /* malloc'd or NULL */
 bool   pending_fix_exists(void);
 void   pending_fix_clear(void);
+
+/* ---- More helpers (core.c) ----------------------------------------------- */
+char  *str_splice(const char *text, size_t at, size_t remove, const char *insert);
+char  *json_remove_entry(const char *text, long q, size_t e);
+int    steam_libraries(char libs[][1024], int max);
+int    steam_edit_launch_options(const char *cfg, char *(*edit)(const char *cur, void *ud), void *ud,
+                                 const char *backup_suffix, char *backup_out, size_t bn);
+void   steam_start(void);
+void   steam_open_url(const char *url);
+
+/* ---- Debug log (log.c) -------------------------------------------------------- */
+void   log_init(void);
+void   pzlog(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
+void   pzlog_file(const char *label, const char *path, size_t max);
+const char *log_path(void);
+
+/* ---- ZombieBuddy (zb.c) ------------------------------------------------------- */
+#define ZB_MOD_ID       "3619862853"
+#define ZB_BETA_MOD_ID  "3812624292"
+#define ZB_JAR          "ZombieBuddy.jar"
+typedef struct {
+    bool ws_found[2];                 /* [0] stable, [1] beta Workshop copy downloaded */
+    char ws_jar[2][1024];
+    char ws_ver[2][32];
+    char game_dir[1024];              /* folder of ProjectZomboid64.json */
+    bool jar_installed;
+    char inst_ver[32];
+    bool in_json;                     /* ZombieBuddy entry in the game file's vmArgs */
+    char json_arg[256];
+    bool in_steam;                    /* ZombieBuddy in Steam's launch options */
+    char steam_opts[1024];
+    bool approvals_exist;             /* ~/.zombie_buddy */
+} ZbStatus;
+void   zb_scan(const char *json_path, const char *steam_cfg, ZbStatus *st);
+void   zb_agent_arg(int policy, int verbosity, char *out, size_t n);   /* policy 0 prompt, 1 deny-new; verbosity 0..2 */
+bool   zb_copy_jar(const ZbStatus *st, int channel, char *msg, size_t n);
+int    zb_json_set(const char *json_path, const char *agent_arg);    /* agent_arg NULL = remove. 1 changed, 0 same, -1 error */
+int    zb_steam_set(const char *steam_cfg, const char *agent_arg);   /* same, for Steam's launch options */
+bool   zb_remove_files(const ZbStatus *st, char *msg, size_t n);
+bool   zb_delete_approvals(void);
+bool   jar_version(const char *jar, char *out, size_t n);
+bool   version_newer(const char *a, const char *b);                  /* a > b */
 
 /* ---- Clipboard (clipboard.c) ------------------------------------------------ */
 bool   clip_init(void);

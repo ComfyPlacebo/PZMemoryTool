@@ -2,11 +2,12 @@
 #
 #  - Windows: PZMemoryTool.exe as a download on the Actions run page ("Artifacts").
 #    It is NOT put on the Releases page.
-#  - Linux / SteamOS: published as the pre-release "v1.1.0-preview" on the Releases
+#  - Linux / SteamOS: published as the pre-release "v1.2.0-preview" on the Releases
 #    page (a .tar.gz and the bare program file), replaced on every push to this branch.
+#    Built with Zig against an old glibc (2.31), so it runs on older Linux / SteamOS too.
 #
-# Version numbers: the 4th number is the run number of this workflow (1.1.0.<run>),
-# so every preview build can be told apart. Product version: 1.1.0-preview.
+# Version numbers: the 4th number is the run number of this workflow (1.2.0.<run>),
+# so every preview build can be told apart. Product version: 1.2.0-preview.
 
 name: Preview builds
 
@@ -19,9 +20,10 @@ permissions:
   contents: write   # needed to create / update the Linux pre-release
 
 env:
-  VERSION: 1.1.0
-  PRODUCT_VERSION: 1.1.0-preview
-  RELEASE_TAG: v1.1.0-preview
+  VERSION: 1.2.0
+  PRODUCT_VERSION: 1.2.0-preview
+  RELEASE_TAG: v1.2.0-preview
+  OLD_RELEASE_TAGS: v1.1.0-preview
 
 jobs:
   windows:
@@ -30,7 +32,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set the build number (1.1.0.${{ github.run_number }})
+      - name: Set the build number (${{ env.VERSION }}.${{ github.run_number }})
         shell: pwsh
         run: |
           $f = "PZMemoryTool.cs"
@@ -74,14 +76,16 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential git libx11-dev libxrandr-dev libxinerama-dev \
                                   libxcursor-dev libxi-dev libgl1-mesa-dev
+          pip install ziglang==0.17.1
 
       - name: Build
-        run: PZMT_VERSION="$PRODUCT_VERSION" PZMT_BUILD="${{ github.run_number }}" sh linux/build.sh
+        run: PZMT_ZIG=1 PZMT_VERSION="$PRODUCT_VERSION" PZMT_BUILD="${{ github.run_number }}" sh linux/build.sh
 
       - name: Check and package
         run: |
           cd linux
           ./PZMemoryTool --version
+          echo "Needs glibc: $(objdump -T PZMemoryTool | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
           mkdir -p dist/PZMemoryTool
           cp PZMemoryTool dist/PZMemoryTool/
           cp ../README.md dist/PZMemoryTool/
@@ -99,7 +103,7 @@ jobs:
             linux/dist/PZMemoryTool-linux-steamos
             linux/dist/SHA256.txt
 
-      - name: Publish the pre-release v1.1.0-preview
+      - name: Publish the pre-release v1.2.0-preview
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -108,6 +112,8 @@ jobs:
           **Preview build for Linux / SteamOS (Steam Deck, Steam Machine and Linux PCs).** Build ${{ github.run_number }}, from commit ${GITHUB_SHA::7}.
 
           This is a test version. The finished Windows version is [v1.1.0](https://github.com/${{ github.repository }}/releases/tag/v1.1.0).
+
+          **New in 1.2.0-preview:** ZombieBuddy installer (from the Steam Workshop download, switched on in the game file), a log file of what the tool does (F12 or the controller's View button copies it), Steam account detection fixes, finds the game file one folder deeper on Linux, Steam is opened again after the tool closed it.
 
           **Downloads**
           - \`PZMemoryTool-$PRODUCT_VERSION-linux-steamos.tar.gz\` – recommended: keeps the "can run" permission. Extract, then open \`PZMemoryTool\`.
@@ -120,7 +126,8 @@ jobs:
           $(cat SHA256.txt)
           \`\`\`
           EOF
-          # Replace the previous preview build (the tag moves to this commit)
+          # Remove older preview versions, then replace the previous build of this one (the tag moves to this commit)
+          for t in $OLD_RELEASE_TAGS; do gh release delete "$t" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true; done
           gh release delete "$RELEASE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
           gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
             --title "PZ Memory Tool $PRODUCT_VERSION – Linux / SteamOS (build ${{ github.run_number }})" \

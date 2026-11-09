@@ -2,20 +2,21 @@
 
 A small open-source tool that checks and sets how much RAM Project Zomboid is allowed to use
 (the `-Xmx` maximum and `-Xms` minimum settings in `ProjectZomboid64.json`), clears memory
-settings from Steam's launch options, and copies the game's `console.txt` log to your clipboard.
+settings from Steam's launch options, installs [ZombieBuddy](https://github.com/zed-0xff/ZombieBuddy)
+from the Steam Workshop, and copies the game's `console.txt` log to your clipboard.
 
-**This is the `preview` branch: version 1.1.0-preview**, for testing before 1.2.0.
+**This is the `preview` branch: version 1.2.0-preview**, for testing before 1.2.0.
 
 | | Windows | Linux / SteamOS (Steam Deck, Steam Machine, Linux PCs) |
 |---|---|---|
-| Download | [Actions](../../actions/workflows/preview.yml) > newest run > **Artifacts** | [Releases > v1.1.0-preview](../../releases/tag/v1.1.0-preview) (pre-release) |
-| File | `PZMemoryTool.exe` | `PZMemoryTool-1.1.0-preview-linux-steamos.tar.gz` or the bare `PZMemoryTool-linux-steamos` |
-| Source | `PZMemoryTool.cs` (one file) | `linux/src/` (four short C files) |
+| Download | [Actions](../../actions/workflows/preview.yml) > newest run > **Artifacts** | [Releases > v1.2.0-preview](../../releases/tag/v1.2.0-preview) (pre-release) |
+| File | `PZMemoryTool.exe` | `PZMemoryTool-1.2.0-preview-linux-steamos.tar.gz` or the bare `PZMemoryTool-linux-steamos` |
+| Source | `PZMemoryTool.cs` (one file) | `linux/src/` (six C files) |
 
 The finished Windows version is [v1.1.0](../../releases/tag/v1.1.0). Both preview downloads are
 built by GitHub from the source in this branch (see [How the downloads are built](#how-the-downloads-are-built)).
 
-**Contents:** [What it does](#what-it-does) ·
+**Contents:** [What it does](#what-it-does) · [ZombieBuddy](#zombiebuddy) · [Log file](#log-file) ·
 [Windows](#windows) · [Linux / SteamOS](#linux--steamos) · [Steam Deck](#steam-deck) ·
 [Memory rules](#memory-rules) · [Steam Deck memory, explained](#steam-deck-memory-explained) ·
 [Is it safe?](#is-it-safe) · [Building it yourself](#building-it-yourself)
@@ -45,6 +46,12 @@ built by GitHub from the source in this branch (see [How the downloads are built
    anywhere you can type). Works while the game is running.
 7. **Refresh.** The circular-arrow button at the top right re-reads everything, keeping your
    current choices.
+8. **ZombieBuddy.** The ZombieBuddy box installs, updates or removes ZombieBuddy (see [below](#zombiebuddy)).
+
+When the tool closes Steam to change its launch options, it starts Steam again afterwards.
+
+Note: **Alternate Launch** (Steam's second Play option on Windows) runs `ProjectZomboid64.bat`, which has
+its own `-Xmx` setting. This tool sets the normal launch (`ProjectZomboid64.json`).
 
 **Project Zomboid and Steam must be closed to save.** The tool opens normally while the game is
 running, so you can check your allocation or copy the console log mid-game. **Save** and
@@ -61,15 +68,57 @@ Steam's "Verify integrity of game files" or a game update can reset the game fil
 
 ---
 
+## ZombieBuddy
+
+[ZombieBuddy](https://github.com/zed-0xff/ZombieBuddy) (by Zed, MIT licence) lets Project Zomboid load
+Java mods. The **ZombieBuddy** box above the Console Copier opens a window that installs it the same way
+ZombieBuddy's own Windows installer does:
+
+1. **Subscribe on the Steam Workshop.** If you aren't subscribed yet, **Subscribe on Workshop** opens the
+   page in Steam. The window notices by itself when Steam has downloaded it (stable, or beta if you're
+   subscribed to that one; with both, you choose).
+2. **Choose where to switch it on.**
+   - Windows: **Game file** (normal launch), **Alternate Launch** (`ProjectZomboid64.bat`) and **Steam
+     launch options**, all ticked. For Steam, the tool closes Steam, makes the change and opens Steam again.
+   - Linux / SteamOS: the game file only. Linux reads `ProjectZomboid64.json` on every start, so Steam's
+     launch options aren't needed and Steam is never closed.
+3. **Advanced** (click it to open): approval policy (*ask me for each new mod*, the default, or *only load
+   mods I already approved*) and how much ZombieBuddy writes to its own log.
+4. **Install / Update**, **Uninstall** or **Close**. Install and Uninstall show the list of changes first,
+   then a report. Uninstall can also delete your saved mod approvals.
+
+What Install does: copies `ZombieBuddy.jar` (and `zbNative.dll` on Windows) from your Workshop download
+into the game folder, and adds `-agentlib:zbNative` (Windows) or `-javaagent:ZombieBuddy.jar` (Linux) to
+the places you ticked. ZombieBuddy keeps itself up to date from the Workshop copy after that.
+
+Java mods have full access to your computer. ZombieBuddy asks before it loads each new one: only allow
+mods you trust.
+
+## Log file
+
+The tool writes what it detects and does (game file, memory, Steam, ZombieBuddy, every button) to a log:
+
+- Windows: `%LOCALAPPDATA%\PZMemoryTool\log.txt`
+- Linux / SteamOS: `~/.local/state/PZMemoryTool/log.txt`
+
+Only two runs are kept: `log.txt` (this run) and `log-previous.txt` (the run before). Each start deletes
+the older one, and one run never writes more than 1 MB. Press **F12** (or **View** on a controller) to
+copy the log to the clipboard, to paste it into a message when something goes wrong. It contains file
+paths, which include your user name. Nothing is ever sent anywhere.
+
+---
+
 ## Windows
 
-**What's new in 1.1.0-preview:** "Copy as text" button; installed memory shown with the amount
-Windows can use ("32 GB (31.7 GB usable)"); new upper limits on 16 GB and up (see [rules](#memory-rules)).
+**What's new in 1.2.0-preview:** ZombieBuddy installer; log file (F12 copies it); Steam is opened again
+after the tool closed it; better detection of the signed-in Steam account. Since 1.1.0: "Copy as text"
+button, installed memory shown with the amount Windows can use ("32 GB (31.7 GB usable)"), new upper
+limits on 16 GB and up (see [rules](#memory-rules)).
 
 ### Download and run
 
 1. Open [Actions > Preview builds](../../actions/workflows/preview.yml), click the newest run with a
-   green tick, scroll to **Artifacts** and download `PZMemoryTool-1.1.0-preview-…-windows`
+   green tick, scroll to **Artifacts** and download `PZMemoryTool-1.2.0-preview-…-windows`
    (you need to be signed in to GitHub). It's a .zip: extract it.
 2. Your browser may warn about the download, because the program is new and not digitally signed:
    - **Edge:** "…isn't commonly downloaded" > hover over it > **⋯** > **Keep** > **Show more** > **Keep anyway**.
@@ -98,8 +147,8 @@ font (Noto Sans), and works with mouse, touch, keyboard and controller.
 
 ### Download and run
 
-1. Open [Releases > v1.1.0-preview](../../releases/tag/v1.1.0-preview) and download **one** of:
-   - `PZMemoryTool-1.1.0-preview-linux-steamos.tar.gz` (recommended). In Dolphin (the file manager
+1. Open [Releases > v1.2.0-preview](../../releases/tag/v1.2.0-preview) and download **one** of:
+   - `PZMemoryTool-1.2.0-preview-linux-steamos.tar.gz` (recommended). In Dolphin (the file manager
      in Desktop Mode): right-click it > **Extract** > **Extract archive here**. Open the new
      `PZMemoryTool` folder. The program inside is ready to run.
    - `PZMemoryTool-linux-steamos` (the bare program file). Downloads lose their "can run"
@@ -114,8 +163,9 @@ font (Noto Sans), and works with mouse, touch, keyboard and controller.
 **Where it writes on Linux:** the game file and its `.bak`; Steam's `localconfig.vdf` (only Project
 Zomboid's launch options, only if they contain `-Xmx` / `-Xms`) and its backup;
 `~/.config/PZMemoryTool/settings.ini` (one line: your "Add to Steam" answer); a copy of
-`console.txt` in `~/.cache/PZMemoryTool/` when you use Copy Console; and, only for the Game Mode
-"Fix it for me" step, a temporary autostart entry that removes itself.
+`console.txt` in `~/.cache/PZMemoryTool/` when you use Copy Console; the [log file](#log-file); for
+ZombieBuddy, `ZombieBuddy.jar` in the game folder (and its entry in the game file); and, only for the
+Game Mode "Fix it for me" step, a temporary autostart entry that removes itself.
 
 ### Controls
 
@@ -259,10 +309,11 @@ Both preview downloads are built by GitHub Actions ([`.github/workflows/preview.
 on every push to this branch, from the source you see here. Nothing is uploaded by hand.
 
 - **Windows:** compiled with the C# compiler built into Windows (same command as `build.bat`). Version
-  1.1.0.*N* where *N* is the run number; product version 1.1.0-preview. Available under **Artifacts**
+  1.2.0.*N* where *N* is the run number; product version 1.2.0-preview. Available under **Artifacts**
   on the run's page only (not on the Releases page).
-- **Linux / SteamOS:** compiled on Ubuntu 22.04 with raylib 5.5 built in, then published as the
-  pre-release **v1.1.0-preview**, replacing the previous preview build. `PZMemoryTool --version`
+- **Linux / SteamOS:** compiled with raylib 5.5 built in, using Zig's C compiler against an older
+  glibc (2.31) so it runs on older Linux and SteamOS versions too, then published as the
+  pre-release **v1.2.0-preview**, replacing the previous preview build. `PZMemoryTool --version`
   shows the build number.
 
 ## Building it yourself
@@ -281,6 +332,8 @@ sudo apt install build-essential git libx11-dev libxrandr-dev libxinerama-dev li
 # Arch (or SteamOS after "sudo steamos-readonly disable")
 sudo pacman -S base-devel git libx11 libxrandr libxinerama libxcursor libxi mesa
 sh linux/build.sh
+# optional, like the GitHub build (runs on older systems too): pip install ziglang, then
+PZMT_ZIG=1 sh linux/build.sh
 ```
 
 ## Changing the rules
