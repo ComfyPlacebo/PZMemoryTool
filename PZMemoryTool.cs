@@ -1911,6 +1911,7 @@ namespace PZMemoryTool
         static StreamWriter writer;
         static long written;
         static bool capped;
+        static string current;
 
         public static string Folder
         {
@@ -1920,17 +1921,27 @@ namespace PZMemoryTool
 
         public static void Init()
         {
+            try { Directory.CreateDirectory(Folder); } catch { }
             try
             {
-                Directory.CreateDirectory(Folder);
                 string prev = Path.Combine(Folder, "log-previous.txt");
                 if (File.Exists(prev)) File.Delete(prev);
                 if (File.Exists(FilePath)) File.Move(FilePath, prev);
-                writer = new StreamWriter(new FileStream(FilePath, FileMode.Create, FileAccess.Write, FileShare.ReadWrite),
-                                          new UTF8Encoding(false));
-                writer.AutoFlush = true;
             }
-            catch { writer = null; }
+            catch { }   // e.g. the tool is open twice: keep going with a fresh log
+            string[] names = { FilePath, Path.Combine(Folder, "log-2.txt") };
+            foreach (string f in names)
+            {
+                try
+                {
+                    writer = new StreamWriter(new FileStream(f, FileMode.Create, FileAccess.Write, FileShare.ReadWrite),
+                                              new UTF8Encoding(false));
+                    writer.AutoFlush = true;
+                    current = f;
+                    return;
+                }
+                catch { writer = null; }
+            }
         }
 
         // One log line per text line, so multi-line messages stay readable.
@@ -1974,7 +1985,7 @@ namespace PZMemoryTool
         {
             try
             {
-                using (FileStream fs = new FileStream(FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (FileStream fs = new FileStream(current ?? FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                 using (StreamReader r = new StreamReader(fs))
                     return r.ReadToEnd();
             }
@@ -3433,12 +3444,18 @@ namespace PZMemoryTool
                 "restore only the game file and leave the Steam launch options as they are");
 
             List<string> done = new List<string>();
+            ZbStatus zbBefore = Zb.Scan(jsonPath);   // the backups are older than ZombieBuddy: keep it switched on
             try
             {
                 if (fileBackup)
                 {
                     File.Copy(backup, jsonPath, true);
                     done.Add("Game file restored.");
+                    if (zbBefore.InJson)
+                    {
+                        string t = File.ReadAllText(jsonPath), n = Zb.SetJsonEntry(t, zbBefore.JsonArg);
+                        if (n != t) { File.WriteAllText(jsonPath, n); done.Add("ZombieBuddy was kept switched on in the game file."); }
+                    }
                 }
             }
             catch (UnauthorizedAccessException) { OfferAdminRelaunch(); return; }
@@ -3454,7 +3471,14 @@ namespace PZMemoryTool
                     {
                         foreach (string f in SteamLaunchOptions.ConfigFiles())
                             if (SteamLaunchOptions.RestoreFromBackup(f))
+                            {
+                                string zbArg = null;
+                                foreach (string tok in zbBefore.SteamOpts.Split(' ')) if (zbBefore.InSteam && Zb.IsZbArg(tok)) zbArg = tok;
+                                if (zbArg != null &&
+                                    SteamLaunchOptions.Edit(f, delegate (string cur) { return Zb.SetSteamOptions(cur, zbArg); }, Zb.BackupSuffix) == 1)
+                                    done.Add("ZombieBuddy was kept in Steam's launch options.");
                                 done.Add("Steam launch options restored to: " + SteamLaunchOptions.CurrentValue(f));
+                            }
                     }
                     catch (Exception ex) { done.Add("Steam launch options could not be restored: " + ex.Message); }
                     string again = ReopenSteam(steamWasRunning);

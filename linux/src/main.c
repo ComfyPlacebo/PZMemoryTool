@@ -1239,6 +1239,8 @@ static bool restore_file_wanted, restore_steam_wanted;
 static void do_restore(bool do_steam)
 {
     Buf done = {0};
+    ZbStatus zb_before;                       /* the backups are older than ZombieBuddy: keep it switched on */
+    zb_scan(json_path, steam_cfg, &zb_before);
     if (restore_file_wanted) {
         char backup[PATH_MAX];
         snprintf(backup, sizeof backup, "%s.bak", json_path);
@@ -1249,12 +1251,21 @@ static void do_restore(bool do_steam)
             return;
         }
         buf_adds(&done, "Game file restored.");
+        if (zb_before.in_json && zb_json_set(json_path, zb_before.json_arg) == 1)
+            buf_adds(&done, "\nZombieBuddy was kept switched on in the game file.");
     }
     if (restore_steam_wanted) {
         if (done.len) buf_adds(&done, "\n\n");
         if (pending_game_mode_fix == 1) buf_adds(&done, "Steam launch options will be restored in Desktop Mode (\"Fix it for me\").");
         else if (!do_steam) buf_adds(&done, "Steam launch options were NOT restored (Steam was still running).");
         else if (steam_restore_from_backup(steam_cfg)) {
+            if (zb_before.in_steam) {          /* put back the ZombieBuddy entry that was there */
+                char arg[256] = "";
+                const char *p = strstr(zb_before.steam_opts, "-javaagent:");
+                if (p) { size_t l = strcspn(p, " \t"); if (l < sizeof arg) { memcpy(arg, p, l); arg[l] = 0; } }
+                if (arg[0] && strstr(arg, "ZombieBuddy") && zb_steam_set(steam_cfg, arg) == 1)
+                    buf_adds(&done, "ZombieBuddy was kept in Steam's launch options.\n");
+            }
             char *t = read_file(steam_cfg, NULL);
             char *lo = t ? steam_launch_options(t) : NULL;
             buf_addf(&done, "Steam launch options restored to: %s", lo ? lo : "");
