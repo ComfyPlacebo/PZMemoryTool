@@ -438,6 +438,24 @@ namespace PZMemoryTool
         {
             AutoScaleMode = AutoScaleMode.None;   // we scale layout ourselves (Ui.S)
             Font = Ui.Font(10f);
+            if (AppIcon != null) Icon = AppIcon;
+        }
+
+        // The "PZ" icon built into the exe (PZMemoryTool.ico, same as the Linux window icon),
+        // used for the title bar and taskbar. Falls back to the default icon if it can't be read.
+        static Icon appIcon;
+        static bool appIconTried;
+        public static Icon AppIcon
+        {
+            get
+            {
+                if (!appIconTried)
+                {
+                    appIconTried = true;
+                    try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { appIcon = null; }
+                }
+                return appIcon;
+            }
         }
 
         protected override void OnHandleCreated(EventArgs e)

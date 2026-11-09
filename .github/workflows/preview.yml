@@ -44,7 +44,7 @@ jobs:
       - name: Build with the C# compiler built into Windows (same as build.bat)
         shell: cmd
         run: |
-          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /out:PZMemoryTool.exe /win32manifest:PZMemoryTool.manifest /r:System.Windows.Forms.dll /r:System.Drawing.dll PZMemoryTool.cs
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /out:PZMemoryTool.exe /win32manifest:PZMemoryTool.manifest /win32icon:PZMemoryTool.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll PZMemoryTool.cs
 
       - name: Checksum and version check
         shell: pwsh
