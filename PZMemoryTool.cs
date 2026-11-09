@@ -3060,7 +3060,7 @@ namespace PZMemoryTool
         {
             ZbStatus z = Zb.Scan(jsonPath);
             lblZbStatus.Text = Zb.StatusText(z);
-            btnZb.Text = z.AnyInstalled ? "ZombieBuddy options..." : "Install ZombieBuddy...";
+            btnZb.Text = z.AnyInstalled ? "Install / Update..." : "Install...";
         }
 
         // Measured pixel widths -> layout units at 100% scaling

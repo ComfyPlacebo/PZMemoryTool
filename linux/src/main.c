@@ -2099,7 +2099,7 @@ static void draw_main(void)
     text_box(F_SUB, zst, R(zr.x + 8, zr.y + 24, box_w - 16, 18), T.sub, AL_CENTER, 0);
     bool zb_inst = zb_main.jar_installed || zb_main.in_json || zb_main.in_steam;
     float zw = box_w - 24;
-    if (ui_button(ID_ZB_OPEN, R(zr.x + 12, zr.y + 46, zw, 34), zb_inst ? "ZombieBuddy options..." : "Install ZombieBuddy...",
+    if (ui_button(ID_ZB_OPEN, R(zr.x + 12, zr.y + 46, zw, 34), zb_inst ? "Install / Update..." : "Install...",
                   ui_ready, BTN_NORMAL, F_UI))
         zb_open_window();
 
