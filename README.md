@@ -5,16 +5,17 @@ A small open-source tool that checks and sets how much RAM Project Zomboid is al
 settings from Steam's launch options, installs [ZombieBuddy](https://github.com/zed-0xff/ZombieBuddy)
 from the Steam Workshop, and copies the game's `console.txt` log to your clipboard.
 
-**This is the `preview` branch: version 1.2.0-preview**, for testing before 1.2.0.
+**Version 1.2.0**, for Windows and, new in this version, Linux / SteamOS.
 
 | | Windows | Linux / SteamOS (Steam Deck, Steam Machine, Linux PCs) |
 |---|---|---|
-| Download | [Actions](../../actions/workflows/preview.yml) > newest run > **Artifacts** | [Releases > v1.2.0-preview](../../releases/tag/v1.2.0-preview) (pre-release) |
-| File | `PZMemoryTool.exe` | `PZMemoryTool-1.2.0-preview-linux-steamos.tar.gz` or the bare `PZMemoryTool-linux-steamos` |
+| Download | [Releases > v1.2.0](../../releases/tag/v1.2.0) | [Releases > v1.2.0](../../releases/tag/v1.2.0) |
+| File | `PZMemoryTool.exe` | `PZMemoryTool-1.2.0-linux-steamos.tar.gz` or the bare `PZMemoryTool-linux-steamos` |
 | Source | `PZMemoryTool.cs` (one file) | `linux/src/` (six C files) |
 
-The finished Windows version is [v1.1.0](../../releases/tag/v1.1.0). Both preview downloads are
-built by GitHub from the source in this branch (see [How the downloads are built](#how-the-downloads-are-built)).
+**New in 1.2.0:** ZombieBuddy installer; Linux / SteamOS version; log file (F12 copies it); Steam is
+opened again after the tool closed it; better detection of the signed-in Steam account; "Restore
+backup" keeps ZombieBuddy switched on; the "PZ" program icon on Windows too.
 
 **Contents:** [What it does](#what-it-does) · [ZombieBuddy](#zombiebuddy) · [Log file](#log-file) ·
 [Windows](#windows) · [Linux / SteamOS](#linux--steamos) · [Steam Deck](#steam-deck) ·
@@ -110,16 +111,12 @@ paths, which include your user name. Nothing is ever sent anywhere.
 
 ## Windows
 
-**What's new in 1.2.0-preview:** ZombieBuddy installer; log file (F12 copies it); Steam is opened again
-after the tool closed it; better detection of the signed-in Steam account. Since 1.1.0: "Copy as text"
-button, installed memory shown with the amount Windows can use ("32 GB (31.7 GB usable)"), new upper
-limits on 16 GB and up (see [rules](#memory-rules)).
+**What's new in 1.2.0:** ZombieBuddy installer; log file (F12 copies it); Steam is opened again
+after the tool closed it; better detection of the signed-in Steam account; the "PZ" program icon.
 
 ### Download and run
 
-1. Open [Actions > Preview builds](../../actions/workflows/preview.yml), click the newest run with a
-   green tick, scroll to **Artifacts** and download `PZMemoryTool-1.2.0-preview-…-windows`
-   (you need to be signed in to GitHub). It's a .zip: extract it.
+1. Open [Releases > v1.2.0](../../releases/tag/v1.2.0) and download `PZMemoryTool.exe`.
 2. Your browser may warn about the download, because the program is new and not digitally signed:
    - **Edge:** "…isn't commonly downloaded" > hover over it > **⋯** > **Keep** > **Show more** > **Keep anyway**.
    - **Chrome:** "Suspicious download" > **Keep** (or **Download suspicious file**).
@@ -130,7 +127,7 @@ limits on 16 GB and up (see [rules](#memory-rules)).
 4. Because the game folder is under Program Files, Windows may ask for administrator permission
    when you save.
 
-`SHA256.txt` in the download lets you check the file matches the build on GitHub.
+`SHA256.txt` on the release page lets you check the file (in PowerShell: `Get-FileHash PZMemoryTool.exe`).
 
 **Look and feel:** the window follows your Windows settings automatically, and updates live if you
 change them: dark / light mode, accent colour, High Contrast themes, display scaling and the Windows
@@ -147,8 +144,8 @@ font (Noto Sans), and works with mouse, touch, keyboard and controller.
 
 ### Download and run
 
-1. Open [Releases > v1.2.0-preview](../../releases/tag/v1.2.0-preview) and download **one** of:
-   - `PZMemoryTool-1.2.0-preview-linux-steamos.tar.gz` (recommended). In Dolphin (the file manager
+1. Open [Releases > v1.2.0](../../releases/tag/v1.2.0) and download **one** of:
+   - `PZMemoryTool-1.2.0-linux-steamos.tar.gz` (recommended). In Dolphin (the file manager
      in Desktop Mode): right-click it > **Extract** > **Extract archive here**. Open the new
      `PZMemoryTool` folder. The program inside is ready to run.
    - `PZMemoryTool-linux-steamos` (the bare program file). Downloads lose their "can run"
@@ -305,22 +302,22 @@ colour settings from the registry.
 
 ## How the downloads are built
 
-Both preview downloads are built by GitHub Actions ([`.github/workflows/preview.yml`](.github/workflows/preview.yml))
-on every push to this branch, from the source you see here. Nothing is uploaded by hand.
+The release files on the Releases page are built from the source in this branch:
 
-- **Windows:** compiled with the C# compiler built into Windows (same command as `build.bat`). Version
-  1.2.0.*N* where *N* is the run number; product version 1.2.0-preview. Available under **Artifacts**
-  on the run's page only (not on the Releases page).
+- **Windows:** compiled with the same command as `build.bat`, with `PZMemoryTool.manifest` and the
+  `PZMemoryTool.ico` icon built in.
 - **Linux / SteamOS:** compiled with raylib 5.5 built in, using Zig's C compiler against an older
-  glibc (2.31) so it runs on older Linux and SteamOS versions too, then published as the
-  pre-release **v1.2.0-preview**, replacing the previous preview build. `PZMemoryTool --version`
-  shows the build number.
+  glibc (2.31) so it runs on older Linux and SteamOS versions too (`PZMT_ZIG=1 sh linux/build.sh`).
+  `PZMemoryTool --version` shows the version.
+
+Test versions of the next release are built automatically by GitHub Actions on the `preview` branch
+([`.github/workflows/preview.yml`](.github/workflows/preview.yml)).
 
 ## Building it yourself
 
 **Windows:** double-click `build.bat`. It uses the C# compiler that ships with Windows (.NET
 Framework 4.x), so nothing needs to be downloaded, and embeds `PZMemoryTool.manifest` (tells Windows
-the tool runs with normal user rights). A self-built exe doesn't trigger SmartScreen on your own PC.
+the tool runs with normal user rights) and the `PZMemoryTool.ico` icon. A self-built exe doesn't trigger SmartScreen on your own PC.
 
 **Linux:** install a C compiler and the X11 / OpenGL development files, then run `sh linux/build.sh`.
 It downloads raylib 5.5 once, builds it into the program, and leaves `linux/PZMemoryTool`

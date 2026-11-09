@@ -43,7 +43,7 @@ using System.Reflection;
 [assembly: AssemblyCopyright("Copyright (c) 2026 ComfyPlacebo")]
 [assembly: AssemblyVersion("1.2.0.0")]
 [assembly: AssemblyFileVersion("1.2.0.0")]
-[assembly: AssemblyInformationalVersion("1.2.0-preview")]
+[assembly: AssemblyInformationalVersion("1.2.0")]
 
 namespace PZMemoryTool
 {
@@ -90,7 +90,7 @@ namespace PZMemoryTool
     // -------------------------------------------------------------------------
     static class Settings
     {
-        public const string Version = "1.2.0-preview";
+        public const string Version = "1.2.0";
         public const string DefaultFolder =
             @"C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid";
         public const string JsonName = "ProjectZomboid64.json";

@@ -12,7 +12,7 @@
 #  On Arch / SteamOS (Desktop Mode, after "sudo steamos-readonly disable"):
 #    sudo pacman -S base-devel git libx11 libxrandr libxinerama libxcursor libxi mesa
 #
-#  Usage:  sh build.sh   (optional: PZMT_VERSION=1.2.0-preview PZMT_BUILD=12 sh build.sh)
+#  Usage:  sh build.sh   (optional: PZMT_VERSION=1.2.0 PZMT_BUILD=12 sh build.sh)
 #
 #  PZMT_ZIG=1 builds with Zig's C compiler (pip install ziglang) against an old
 #  glibc (2.31), so the program also runs on older Linux and SteamOS versions.

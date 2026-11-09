@@ -14,7 +14,7 @@
 #include <stddef.h>
 
 #ifndef PZMT_VERSION
-#define PZMT_VERSION "1.2.0-preview"
+#define PZMT_VERSION "1.2.0"
 #endif
 #ifndef PZMT_BUILD
 #define PZMT_BUILD "0"          /* GitHub Actions sets this to the run number */
