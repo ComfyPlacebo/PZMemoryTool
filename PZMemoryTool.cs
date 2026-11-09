@@ -10,6 +10,11 @@
 //  and, only if they contain -Xmx / -Xms, Steam's launch options for Project
 //  Zomboid in localconfig.vdf (also backed up first). The Console Copier
 //  puts a copy of console.txt in your Temp folder so it can go on the clipboard.
+//  The ZombieBuddy installer copies ZombieBuddy.jar and zbNative.dll from your
+//  Steam Workshop download into the game folder and adds -agentlib:zbNative to
+//  the game file, ProjectZomboid64.bat and/or Steam's launch options.
+//  A log of what the tool does is kept in %LOCALAPPDATA%\PZMemoryTool
+//  (this run and the one before only, at most 1 MB).
 //
 //  Build: run build.bat on any Windows 10/11 PC (uses the C# compiler that
 //  ships with Windows / .NET Framework 4.x).
@@ -21,6 +26,8 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.IO.Compression;
+using System.Text;
 using System.Runtime.InteropServices;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -30,13 +37,13 @@ using System.Reflection;
 
 // File details shown in Windows (right-click the .exe > Properties > Details)
 [assembly: AssemblyTitle("PZ Memory Tool")]
-[assembly: AssemblyDescription("Sets Project Zomboid's memory allocation (-Xmx / -Xms) and copies console.txt. Open source.")]
+[assembly: AssemblyDescription("Sets Project Zomboid's memory allocation (-Xmx / -Xms), installs ZombieBuddy and copies console.txt. Open source.")]
 [assembly: AssemblyCompany("ComfyPlacebo")]
 [assembly: AssemblyProduct("PZ Memory Tool")]
 [assembly: AssemblyCopyright("Copyright (c) 2026 ComfyPlacebo")]
-[assembly: AssemblyVersion("1.1.0.0")]
-[assembly: AssemblyFileVersion("1.1.0.0")]
-[assembly: AssemblyInformationalVersion("1.1.0")]
+[assembly: AssemblyVersion("1.2.0.0")]
+[assembly: AssemblyFileVersion("1.2.0.0")]
+[assembly: AssemblyInformationalVersion("1.2.0-preview")]
 
 namespace PZMemoryTool
 {
@@ -45,6 +52,14 @@ namespace PZMemoryTool
         [STAThread]
         static void Main(string[] args)
         {
+            Log.Init();
+            Log.W("PZ Memory Tool " + Settings.Version);
+            Log.W("  Windows " + Environment.OSVersion.Version + (SystemMemory.IsWindows11() ? " (Windows 11)" : " (Windows 10 or older)") +
+                  ", " + (Environment.Is64BitOperatingSystem ? "64-bit" : "32-bit") + ", culture " +
+                  System.Globalization.CultureInfo.CurrentCulture.Name);
+            Log.W("  Program: " + Application.ExecutablePath + (args.Length > 0 ? " | arguments: " + string.Join(" ", args) : ""));
+            Log.W("  Project Zomboid running: " + (ProcessGuard.IsRunning(Settings.GameProcessName) ? "yes" : "no") +
+                  " | Steam running: " + (ProcessGuard.IsRunning(Settings.SteamProcessName) ? "yes" : "no"));
             Ui.EnableDpiAwareness();   // crisp text on 125% / 150% / 200% display scaling
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
@@ -59,9 +74,14 @@ namespace PZMemoryTool
                 path = FileLocator.FindJson();
 
             if (path == null)
+            {
+                Log.W("No game file chosen: closing");
                 return; // user cancelled
+            }
+            Log.W("Game file: " + path);
 
             Application.Run(new MainForm(path));
+            Log.W("Closing the tool");
         }
     }
 
@@ -70,7 +90,7 @@ namespace PZMemoryTool
     // -------------------------------------------------------------------------
     static class Settings
     {
-        public const string Version = "1.1.0";
+        public const string Version = "1.2.0-preview";
         public const string DefaultFolder =
             @"C:\Program Files (x86)\Steam\steamapps\common\ProjectZomboid";
         public const string JsonName = "ProjectZomboid64.json";
@@ -82,7 +102,9 @@ namespace PZMemoryTool
         public const int DefaultXmsGB      = 4;  // -Xms (minimum / starting memory) selected by default
         public const int MinXmsGB          = 4;  // lowest -Xms offered; the highest is the selected -Xmx minus 1 GB
                                                  // (8 GB systems never get -Xms: the option is locked off there)
-        public const int WindowsReserveGB  = 2;  // always leave this much for Windows
+        public const int WindowsReserveGB  = 2;  // 8 GB / 12 GB tiers: their fixed choices must fit in installed RAM minus this
+        public const int Win10ReserveGB    = 6;  // 16 GB and up: highest maximum = installed RAM minus 6 GB on Windows 10
+        public const int Win11ReserveGB    = 7;  // 16 GB and up: highest maximum = installed RAM minus 7 GB on Windows 11
         public const int RecommendedUpgrade = 16;
         public const int GameCheckWaitSeconds = 5;
         public const int SteamCloseWaitSeconds = 30;  // how long "Close Steam for me" waits for Steam to exit
@@ -416,6 +438,24 @@ namespace PZMemoryTool
         {
             AutoScaleMode = AutoScaleMode.None;   // we scale layout ourselves (Ui.S)
             Font = Ui.Font(10f);
+            if (AppIcon != null) Icon = AppIcon;
+        }
+
+        // The "PZ" icon built into the exe (PZMemoryTool.ico, same as the Linux window icon),
+        // used for the title bar and taskbar. Falls back to the default icon if it can't be read.
+        static Icon appIcon;
+        static bool appIconTried;
+        public static Icon AppIcon
+        {
+            get
+            {
+                if (!appIconTried)
+                {
+                    appIconTried = true;
+                    try { appIcon = Icon.ExtractAssociatedIcon(Application.ExecutablePath); } catch { appIcon = null; }
+                }
+                return appIcon;
+            }
         }
 
         protected override void OnHandleCreated(EventArgs e)
@@ -428,7 +468,27 @@ namespace PZMemoryTool
         protected override void OnLoad(EventArgs e)
         {
             Theme.Apply(this);
+            HookLogging(this);
             base.OnLoad(e);
+        }
+
+        // Writes every button press, tick box, dropdown choice and link click to the log.
+        void HookLogging(Control parent)
+        {
+            foreach (Control c in parent.Controls)
+            {
+                string where = Text;
+                if (c is Button) c.Click += delegate (object s, EventArgs a) { Log.W("Button: " + ((Control)s).Text + "  [" + where + "]"); };
+                else if (c is CheckBox) ((CheckBox)c).CheckedChanged += delegate (object s, EventArgs a)
+                    { if (((Control)s).Focused) Log.W("Tick box: " + ((CheckBox)s).Text + " -> " + (((CheckBox)s).Checked ? "on" : "off")); };
+                else if (c is RadioButton) ((RadioButton)c).CheckedChanged += delegate (object s, EventArgs a)
+                    { if (((RadioButton)s).Checked && ((Control)s).Focused) Log.W("Choice: " + ((Control)s).Text); };
+                else if (c is ComboBox) ((ComboBox)c).SelectionChangeCommitted += delegate (object s, EventArgs a)
+                    { Log.W("Dropdown: " + ((ComboBox)s).Text + "  [" + where + "]"); };
+                else if (c is LinkLabel) ((LinkLabel)c).LinkClicked += delegate (object s, LinkLabelLinkClickedEventArgs a)
+                    { Log.W("Link: " + ((Control)s).Text); };
+                if (c.HasChildren) HookLogging(c);
+            }
         }
 
         protected override void OnHandleDestroyed(EventArgs e)
@@ -652,7 +712,7 @@ namespace PZMemoryTool
                 return fromSteam;
 
             // 3) Last resort: ask the user
-            DialogResult r = MessageBox.Show(
+            DialogResult r = Msg.Show(
                 Settings.JsonName + " was not found in the default location or in any Steam library:\n\n" +
                 Settings.DefaultFolder + "\n\n" +
                 "Do you want to search your attached drives for it?\n\n" +
@@ -671,7 +731,7 @@ namespace PZMemoryTool
                 if (found != null)
                     return found;
 
-                if (MessageBox.Show("The file was not found on any drive.\n\nDo you want to pick it manually?",
+                if (Msg.Show("The file was not found on any drive.\n\nDo you want to pick it manually?",
                         "PZ Memory Tool", MessageBoxButtons.YesNo, MessageBoxIcon.Warning) != DialogResult.Yes)
                     return null;
             }
@@ -691,7 +751,7 @@ namespace PZMemoryTool
                         return null;
                     if (IsValidPzJson(dlg.FileName))
                         return dlg.FileName;
-                    MessageBox.Show("That file does not look like Project Zomboid's " + Settings.JsonName +
+                    Msg.Show("That file does not look like Project Zomboid's " + Settings.JsonName +
                         ".\n(It must contain the Project Zomboid main class and an -Xmx memory argument.)",
                         "PZ Memory Tool", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
@@ -772,10 +832,13 @@ namespace PZMemoryTool
             AddRegistryPath(gameDirs, Registry.LocalMachine,
                 @"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\Uninstall\Steam App " + Settings.SteamAppId, "InstallLocation");
 
+            Log.W("Steam folders: " + string.Join(", ", SteamRoots().ToArray()));
             foreach (string dir in gameDirs)
             {
                 string p = Path.Combine(dir, Settings.JsonName);
-                if (FileLocator.IsValidPzJson(p))
+                bool ok = FileLocator.IsValidPzJson(p);
+                Log.W("  checking " + p + ": " + (ok ? "FOUND" : File.Exists(p) ? "exists but not valid" : "not there"));
+                if (ok)
                     return p;
             }
             return null;
@@ -790,7 +853,17 @@ namespace PZMemoryTool
             return roots;
         }
 
-        static List<string> SteamLibraries(string steamRoot)
+        // Every Steam library folder of every Steam install found
+        public static List<string> AllLibraries()
+        {
+            List<string> all = new List<string>();
+            foreach (string root in SteamRoots())
+                foreach (string lib in SteamLibraries(root))
+                    if (!all.Contains(lib)) all.Add(lib);
+            return all;
+        }
+
+        public static List<string> SteamLibraries(string steamRoot)
         {
             List<string> libs = new List<string>();
             libs.Add(steamRoot);
@@ -1101,14 +1174,29 @@ namespace PZMemoryTool
         }
 
         // Steam account number (the folder name under userdata).
-        // 1) the account Steam reports as signed in right now, 2) the most recent sign-in.
+        // 1) the account Steam reports as signed in right now, 2) loginusers.vdf: the account marked
+        // MostRecent, or else the latest sign-in, 3) the account folder whose settings changed last.
+        static string lastAccountLog = "";
+        static readonly StringBuilder accountLog = new StringBuilder();
+        static void AccountLog(string line) { accountLog.AppendLine(line); }
+
         public static long CurrentAccountId()
+        {
+            accountLog.Length = 0;
+            long id = FindAccountId();
+            string text = accountLog.ToString().TrimEnd();
+            if (text != lastAccountLog) { lastAccountLog = text; Log.W(text); }   // called often: log only changes
+            return id;
+        }
+
+        static long FindAccountId()
         {
             try
             {
                 using (RegistryKey k = Registry.CurrentUser.OpenSubKey(@"Software\Valve\Steam\ActiveProcess"))
                 {
                     object v = k == null ? null : k.GetValue("ActiveUser");
+                    AccountLog("Steam ActiveUser (registry): " + (v == null ? "(none)" : v.ToString()));
                     if (v is int && (int)v != 0) return (long)(uint)(int)v;
                 }
             }
@@ -1120,15 +1208,126 @@ namespace PZMemoryTool
                 {
                     string f = Path.Combine(Path.Combine(root, "config"), "loginusers.vdf");
                     if (!File.Exists(f)) continue;
+                    string best = null; long bestTs = -1;
                     foreach (Match m in Regex.Matches(File.ReadAllText(f), "\"(\\d{17})\"\\s*\\{([^}]*)\\}"))
                     {
-                        if (Regex.IsMatch(m.Groups[2].Value, "\"MostRecent\"\\s+\"1\"", RegexOptions.IgnoreCase))
-                            return long.Parse(m.Groups[1].Value) - 76561197960265728L;
+                        string body = m.Groups[2].Value;
+                        bool recent = Regex.IsMatch(body, "\"MostRecent\"\\s+\"1\"", RegexOptions.IgnoreCase);
+                        Match t = Regex.Match(body, "\"Timestamp\"\\s+\"(\\d+)\"", RegexOptions.IgnoreCase);
+                        long ts = t.Success ? long.Parse(t.Groups[1].Value) : 0;
+                        AccountLog("  loginusers.vdf account " + m.Groups[1].Value + ": MostRecent " + (recent ? 1 : 0) + ", Timestamp " + ts);
+                        if (recent) return long.Parse(m.Groups[1].Value) - 76561197960265728L;
+                        if (ts > bestTs) { bestTs = ts; best = m.Groups[1].Value; }
+                    }
+                    if (best != null) { AccountLog("Steam account: latest sign-in " + best); return long.Parse(best) - 76561197960265728L; }
+                }
+                catch { }
+            }
+
+            long newest = 0; DateTime newestTime = DateTime.MinValue;
+            foreach (string root in SteamLocator.SteamRoots())
+            {
+                try
+                {
+                    string ud = Path.Combine(root, "userdata");
+                    if (!Directory.Exists(ud)) continue;
+                    foreach (string d in Directory.GetDirectories(ud))
+                    {
+                        long id;
+                        if (!long.TryParse(Path.GetFileName(d), out id) || id <= 0) continue;
+                        string lc = Path.Combine(Path.Combine(d, "config"), "localconfig.vdf");
+                        if (!File.Exists(lc)) continue;
+                        DateTime t = File.GetLastWriteTimeUtc(lc);
+                        if (t > newestTime) { newestTime = t; newest = id; }
                     }
                 }
                 catch { }
             }
-            return 0;
+            AccountLog(newest > 0 ? "Steam account: newest userdata folder " + newest : "No Steam account found");
+            return newest;
+        }
+
+        // Starts Steam again (after the tool closed it).
+        public static bool StartSteam()
+        {
+            foreach (string root in SteamLocator.SteamRoots())
+            {
+                string exe = Path.Combine(root, "steam.exe");
+                if (!File.Exists(exe)) continue;
+                try { Process.Start(exe); Log.W("Started Steam: " + exe); return true; } catch { }
+            }
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo("steam://open/main");
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+                Log.W("Started Steam: steam://open/main");
+                return true;
+            }
+            catch { return false; }
+        }
+
+        // Changes Project Zomboid's launch options with edit(current) -> new value. Adds the
+        // LaunchOptions entry if there is none yet. Backs up localconfig.vdf (once) to file + backupSuffix.
+        // Returns 1 changed, 0 nothing to change, -1 could not change.
+        public static int Edit(string configFile, Func<string, string> edit, string backupSuffix)
+        {
+            string text = File.ReadAllText(configFile);
+            LaunchOptionsEntry e = Locate(text);
+            string cur = e == null ? "" : e.Value;
+            string nv = edit(cur);
+            Log.W("Steam launch options: \"" + cur + "\" -> \"" + nv + "\"" + (e == null ? " (no LaunchOptions entry yet)" : ""));
+            if (nv == cur) return 0;
+            string updated;
+            if (e != null) updated = text.Substring(0, e.ValueStart) + nv + text.Substring(e.ValueStart + e.ValueLength);
+            else
+            {
+                int at = FindAppSection(text);
+                if (at < 0) { Log.W("Project Zomboid's section not found in " + configFile); return -1; }
+                int ls = at - 1;
+                while (ls > 0 && text[ls - 1] != '\n') ls--;
+                string indent = "";
+                for (int j = ls; j < at - 1 && (text[j] == '\t' || text[j] == ' '); j++) indent += text[j];
+                string nl = text.Contains("\r\n") ? "\r\n" : "\n";
+                updated = text.Insert(at, nl + indent + "\t\"LaunchOptions\"\t\t\"" + nv + "\"");
+            }
+            string backup = configFile + backupSuffix;
+            if (!File.Exists(backup)) File.Copy(configFile, backup);
+            File.WriteAllText(configFile, updated);
+            Log.W("Wrote " + configFile + " (backup: " + backup + ")");
+            return 1;
+        }
+
+        // Position just after the "{" of Software/Valve/Steam/apps/108600, or -1.
+        static int FindAppSection(string text)
+        {
+            List<string> path = new List<string>();
+            string pendingKey = null;
+            int i = 0, n = text.Length;
+            while (i < n)
+            {
+                char c = text[i];
+                if (char.IsWhiteSpace(c)) { i++; continue; }
+                if (c == '/' && i + 1 < n && text[i + 1] == '/') { while (i < n && text[i] != '\n') i++; continue; }
+                if (c == '{')
+                {
+                    path.Add(pendingKey ?? ""); pendingKey = null; i++;
+                    if (IsZomboidApp(path)) return i;
+                    continue;
+                }
+                if (c == '}') { if (path.Count > 0) path.RemoveAt(path.Count - 1); pendingKey = null; i++; continue; }
+                if (c == '"')
+                {
+                    int start = ++i;
+                    while (i < n && text[i] != '"') { if (text[i] == '\\') i++; i++; }
+                    string tok = text.Substring(start, Math.Min(i, n) - start);
+                    i++;
+                    pendingKey = pendingKey == null ? tok : null;
+                    continue;
+                }
+                i++;
+            }
+            return -1;
         }
 
         // Asks Steam to close normally (like Steam > Exit).
@@ -1325,10 +1524,32 @@ namespace PZMemoryTool
             }
             catch { }
 
+            return UsableMB();
+        }
+
+        // RAM Windows can actually use (installed minus what the hardware reserves).
+        public static long UsableMB()
+        {
             MEMORYSTATUSEX s = new MEMORYSTATUSEX();
             if (GlobalMemoryStatusEx(s))
                 return (long)(s.ullTotalPhys / (1024 * 1024));
             return 0;
+        }
+
+        // Windows 11 is build 22000 or later (both report version 10.0).
+        public static bool IsWindows11()
+        {
+            try
+            {
+                using (RegistryKey k = Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Windows NT\CurrentVersion"))
+                {
+                    string b = k == null ? null : k.GetValue("CurrentBuildNumber") as string;
+                    int build;
+                    if (b != null && int.TryParse(b, out build)) return build >= 22000;
+                }
+            }
+            catch { }
+            return Environment.OSVersion.Version.Build >= 22000;
         }
     }
 
@@ -1696,6 +1917,903 @@ namespace PZMemoryTool
     }
 
     // -------------------------------------------------------------------------
+    //  Log file - everything the tool detects and does, for finding problems.
+    //  %LOCALAPPDATA%\PZMemoryTool\log.txt (this run) and log-previous.txt (the
+    //  run before). Each start deletes the older file, so only two runs are ever
+    //  kept, and one run never writes more than 1 MB. Nothing is sent anywhere.
+    //  F12 in the main window copies the log to the clipboard.
+    // -------------------------------------------------------------------------
+    static class Log
+    {
+        public const long MaxBytes = 1024 * 1024;
+        static StreamWriter writer;
+        static long written;
+        static bool capped;
+        static string current;
+
+        public static string Folder
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "PZMemoryTool"); }
+        }
+        public static string FilePath { get { return Path.Combine(Folder, "log.txt"); } }
+
+        public static void Init()
+        {
+            try { Directory.CreateDirectory(Folder); } catch { }
+            try
+            {
+                string prev = Path.Combine(Folder, "log-previous.txt");
+                if (File.Exists(prev)) File.Delete(prev);
+                if (File.Exists(FilePath)) File.Move(FilePath, prev);
+            }
+            catch { }   // e.g. the tool is open twice: keep going with a fresh log
+            string[] names = { FilePath, Path.Combine(Folder, "log-2.txt") };
+            foreach (string f in names)
+            {
+                try
+                {
+                    writer = new StreamWriter(new FileStream(f, FileMode.Create, FileAccess.Write, FileShare.ReadWrite),
+                                              new UTF8Encoding(false));
+                    writer.AutoFlush = true;
+                    current = f;
+                    return;
+                }
+                catch { writer = null; }
+            }
+        }
+
+        // One log line per text line, so multi-line messages stay readable.
+        public static void W(string msg)
+        {
+            if (writer == null || capped) return;
+            try
+            {
+                string ts = DateTime.Now.ToString("HH:mm:ss.fff");
+                StringBuilder sb = new StringBuilder();
+                bool first = true;
+                foreach (string line in (msg ?? "").Replace("\r", "").Split('\n'))
+                {
+                    sb.Append(ts).Append(' ').Append(first ? "" : "    | ").Append(line).Append("\r\n");
+                    first = false;
+                }
+                if (written + sb.Length > MaxBytes)
+                {
+                    writer.Write(ts + " (the log reached 1 MB: nothing more is written during this run)\r\n");
+                    capped = true;
+                    return;
+                }
+                writer.Write(sb.ToString());
+                written += sb.Length;
+            }
+            catch { }
+        }
+
+        public static void FileContents(string label, string path, int max)
+        {
+            try
+            {
+                string t = File.ReadAllText(path);
+                W(label + ": " + path + " (" + t.Length + " characters)" + (t.Length > max ? ", first " + max : "") + ":\n" +
+                  (t.Length > max ? t.Substring(0, max) : t));
+            }
+            catch (Exception ex) { W(label + ": " + path + " (could not read: " + ex.Message + ")"); }
+        }
+
+        public static string ReadAll()
+        {
+            try
+            {
+                using (FileStream fs = new FileStream(current ?? FilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
+                using (StreamReader r = new StreamReader(fs))
+                    return r.ReadToEnd();
+            }
+            catch { return null; }
+        }
+    }
+
+    // Message boxes, logged (what was shown and what was answered).
+    static class Msg
+    {
+        public static DialogResult Show(string text) { return Show(text, "", MessageBoxButtons.OK, MessageBoxIcon.None); }
+        public static DialogResult Show(string text, string caption) { return Show(text, caption, MessageBoxButtons.OK, MessageBoxIcon.None); }
+        public static DialogResult Show(string text, string caption, MessageBoxButtons buttons)
+        {
+            return Show(text, caption, buttons, MessageBoxIcon.None);
+        }
+        public static DialogResult Show(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon)
+        {
+            Log.W("Message shown: " + caption + "\n" + text);
+            DialogResult r = MessageBox.Show(text, caption, buttons, icon);
+            Log.W("Message answered: " + r);
+            return r;
+        }
+        public static DialogResult Show(string text, string caption, MessageBoxButtons buttons, MessageBoxIcon icon,
+                                        MessageBoxDefaultButton def)
+        {
+            Log.W("Message shown: " + caption + "\n" + text);
+            DialogResult r = MessageBox.Show(text, caption, buttons, icon, def);
+            Log.W("Message answered: " + r);
+            return r;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    //  ZombieBuddy (by Zed, https://github.com/zed-0xff/ZombieBuddy, MIT licence)
+    //  lets Project Zomboid load Java mods. This does what its Windows installer
+    //  does: copies zbNative.dll and ZombieBuddy.jar from the Steam Workshop
+    //  download (...\workshop\content\108600\3619862853\mods\ZombieBuddy\libs) into
+    //  the game folder and adds "-agentlib:zbNative" to the game file (normal
+    //  launch), ProjectZomboid64.bat (Alternate Launch) and/or Steam's launch
+    //  options. ZombieBuddy then keeps itself up to date from the Workshop copy.
+    // -------------------------------------------------------------------------
+    class ZbStatus
+    {
+        public bool[] WsFound = new bool[2];            // [0] stable, [1] beta Workshop copy downloaded
+        public string[] WsLibs = new string[2];         // the Workshop "libs" folder
+        public string[] WsVer = { "", "" };
+        public string GameDir = "";
+        public bool JarInstalled, DllInstalled;
+        public string InstVer = "";
+        public bool InJson, BatExists, InBat, InSteam, ApprovalsExist;
+        public string JsonArg = "", SteamOpts = "";
+        public bool AnyInstalled { get { return JarInstalled || DllInstalled || InJson || InBat || InSteam; } }
+        public bool AnyWorkshop { get { return WsFound[0] || WsFound[1]; } }
+    }
+
+    static class Zb
+    {
+        public const string ModId = "3619862853";
+        public const string BetaModId = "3812624292";
+        public const string JarName = "ZombieBuddy.jar";
+        public const string DllName = "zbNative.dll";
+        public const string AgentArg = "-agentlib:zbNative";
+        public const string BackupSuffix = ".pzmemorytool-zb.bak";
+        static string lastScan = "";
+
+        public static string ApprovalsFolder
+        {
+            get { return Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".zombie_buddy"); }
+        }
+
+        public static bool IsZbArg(string s)
+        {
+            return s == AgentArg || s.StartsWith(AgentArg + "=") ||
+                   (s.StartsWith("-javaagent:") && s.IndexOf("ZombieBuddy", StringComparison.OrdinalIgnoreCase) >= 0);
+        }
+
+        // "-agentlib:zbNative" plus the Advanced options (policy 0 = ask, 1 = deny-new; verbosity 0..2)
+        public static string MakeArg(int policy, int verbosity)
+        {
+            List<string> extra = new List<string>();
+            if (policy == 1) extra.Add("policy=deny-new");
+            if (verbosity > 0) extra.Add("verbosity=" + verbosity);
+            return AgentArg + (extra.Count > 0 ? "=" + string.Join(",", extra.ToArray()) : "");
+        }
+
+        public static string BatPath(string gameDir) { return Path.Combine(gameDir, "ProjectZomboid64.bat"); }
+
+        public static ZbStatus Scan(string jsonPath)
+        {
+            ZbStatus st = new ZbStatus();
+            st.GameDir = Path.GetDirectoryName(jsonPath);
+
+            // Workshop copies: the game's own library first, then every Steam library
+            List<string> libs = new List<string>();
+            int sa = jsonPath.IndexOf(@"\steamapps\", StringComparison.OrdinalIgnoreCase);
+            if (sa > 0) libs.Add(jsonPath.Substring(0, sa));
+            foreach (string l in SteamLocator.AllLibraries()) if (!libs.Contains(l)) libs.Add(l);
+            string[] ids = { ModId, BetaModId };
+            for (int c = 0; c < 2; c++)
+            {
+                foreach (string lib in libs)
+                {
+                    string dir = Path.Combine(lib, @"steamapps\workshop\content\" + Settings.SteamAppId + @"\" + ids[c] +
+                                                   @"\mods\ZombieBuddy\libs");
+                    if (!File.Exists(Path.Combine(dir, JarName))) continue;
+                    st.WsFound[c] = true;
+                    st.WsLibs[c] = dir;
+                    st.WsVer[c] = JarVersion(Path.Combine(dir, JarName));
+                    break;
+                }
+            }
+
+            string jar = Path.Combine(st.GameDir, JarName);
+            st.JarInstalled = File.Exists(jar);
+            if (st.JarInstalled) st.InstVer = JarVersion(jar);
+            st.DllInstalled = File.Exists(Path.Combine(st.GameDir, DllName));
+            try
+            {
+                int end; string arg;
+                st.InJson = FindJsonEntry(File.ReadAllText(jsonPath), out end, out arg) >= 0;
+                if (st.InJson) st.JsonArg = arg;
+            }
+            catch { }
+            string bat = BatPath(st.GameDir);
+            st.BatExists = File.Exists(bat);
+            if (st.BatExists)
+            {
+                try
+                {
+                    string v = BatJavaOptions(File.ReadAllText(bat));
+                    st.InBat = v != null && ContainsZbArg(v);
+                }
+                catch { }
+            }
+            foreach (LaunchOptionsEntry e in SteamLaunchOptions.FindAll())
+            {
+                st.SteamOpts = e.Value;
+                if (ContainsZbArg(e.Value)) st.InSteam = true;
+            }
+            st.ApprovalsExist = Directory.Exists(ApprovalsFolder);
+
+            string sum = "ZombieBuddy scan: Workshop stable " + (st.WsFound[0] ? "found " + st.WsVer[0] : "not found") +
+                         " | beta " + (st.WsFound[1] ? "found " + st.WsVer[1] : "not found") +
+                         " | game folder " + st.GameDir + " | jar " + (st.JarInstalled ? "installed " + st.InstVer : "not installed") +
+                         " | dll " + (st.DllInstalled ? "yes" : "no") + " | game file " + (st.InJson ? "has " + st.JsonArg : "no entry") +
+                         " | bat " + (!st.BatExists ? "missing" : st.InBat ? "has ZombieBuddy" : "no ZombieBuddy") +
+                         " | Steam " + (st.InSteam ? "has ZombieBuddy" : "no ZombieBuddy");
+            if (sum != lastScan)   // runs every 2 seconds while the window is open: log only changes
+            {
+                lastScan = sum;
+                Log.W(sum);
+                for (int c = 0; c < 2; c++) if (st.WsFound[c]) Log.W("  " + (c == 0 ? "stable" : "beta") + " Workshop folder: " + st.WsLibs[c]);
+            }
+            return st;
+        }
+
+        public static string StatusText(ZbStatus st)
+        {
+            string ws = st.WsFound[0] ? st.WsVer[0] : st.WsFound[1] ? st.WsVer[1] : "";
+            bool on = st.JarInstalled && (st.InJson || st.InBat || st.InSteam);
+            if (!st.AnyInstalled) return "Not installed";
+            if (!on) return "Copied, but not switched on";
+            if (ws.Length > 0 && st.InstVer.Length > 0 && VersionNewer(ws, st.InstVer))
+                return "Installed v" + st.InstVer + " (v" + ws + " on Workshop)";
+            return st.InstVer.Length > 0 ? "Installed v" + st.InstVer : "Installed";
+        }
+
+        // ---- Version inside the .jar (META-INF/MANIFEST.MF "Implementation-Version") ----
+        public static string JarVersion(string jar)
+        {
+            try
+            {
+                byte[] z = File.ReadAllBytes(jar);
+                int eocd = -1;
+                for (int i = z.Length - 22; i >= 0 && i >= z.Length - 65557; i--)
+                    if (BitConverter.ToUInt32(z, i) == 0x06054b50) { eocd = i; break; }
+                if (eocd < 0) return "";
+                int count = BitConverter.ToUInt16(z, eocd + 10);
+                int p = (int)BitConverter.ToUInt32(z, eocd + 16);
+                for (int k = 0; k < count && p + 46 <= z.Length && BitConverter.ToUInt32(z, p) == 0x02014b50; k++)
+                {
+                    int method = BitConverter.ToUInt16(z, p + 10);
+                    int csize = (int)BitConverter.ToUInt32(z, p + 20);
+                    int fnl = BitConverter.ToUInt16(z, p + 28), exl = BitConverter.ToUInt16(z, p + 30), cml = BitConverter.ToUInt16(z, p + 32);
+                    int loh = (int)BitConverter.ToUInt32(z, p + 42);
+                    string name = Encoding.ASCII.GetString(z, p + 46, fnl);
+                    if (name == "META-INF/MANIFEST.MF")
+                    {
+                        int data = loh + 30 + BitConverter.ToUInt16(z, loh + 26) + BitConverter.ToUInt16(z, loh + 28);
+                        string mf;
+                        if (method == 0) mf = Encoding.UTF8.GetString(z, data, csize);
+                        else
+                        {
+                            using (DeflateStream ds = new DeflateStream(new MemoryStream(z, data, csize), CompressionMode.Decompress))
+                            using (StreamReader r = new StreamReader(ds))
+                                mf = r.ReadToEnd();
+                        }
+                        Match m = Regex.Match(mf, @"Implementation-Version:\s*(\S+)");
+                        return m.Success ? m.Groups[1].Value : "";
+                    }
+                    p += 46 + fnl + exl + cml;
+                }
+            }
+            catch { }
+            return "";
+        }
+
+        // "3.10.2" is newer than "3.9.0"
+        public static bool VersionNewer(string a, string b)
+        {
+            string[] x = Regex.Split(a, @"[^0-9A-Za-z]+"), y = Regex.Split(b, @"[^0-9A-Za-z]+");
+            for (int i = 0; i < Math.Max(x.Length, y.Length); i++)
+            {
+                string s = i < x.Length ? x[i] : "", t = i < y.Length ? y[i] : "";
+                int u, v;
+                bool nu = int.TryParse(s, out u), nv = int.TryParse(t, out v);
+                if (nu && nv) { if (u != v) return u > v; continue; }
+                if (s.Length == 0 || t.Length == 0) return s.Length > 0 && nu;   // "3.5" > "3.5-beta"? no: extra numeric part is newer
+                int c = string.CompareOrdinal(s, t);
+                if (c != 0) return c > 0;
+            }
+            return false;
+        }
+
+        // ---- Files ----
+        // Copies ZombieBuddy.jar and zbNative.dll from the Workshop download. Throws on failure.
+        public static void CopyFiles(ZbStatus st, int channel)
+        {
+            string dir = st.WsLibs[channel];
+            string jar = Path.Combine(st.GameDir, JarName);
+            File.Copy(Path.Combine(dir, JarName), jar, true);
+            Log.W("Copied " + Path.Combine(dir, JarName) + " -> " + jar);
+            if (File.Exists(Path.Combine(dir, DllName)))
+            {
+                File.Copy(Path.Combine(dir, DllName), Path.Combine(st.GameDir, DllName), true);
+                Log.W("Copied " + Path.Combine(dir, DllName) + " -> " + Path.Combine(st.GameDir, DllName));
+            }
+            else Log.W("No zbNative.dll in the Workshop folder");
+            // an update waiting from an older install would replace this one: remove it
+            if (File.Exists(jar + ".new")) { File.Delete(jar + ".new"); Log.W("Removed old " + jar + ".new"); }
+        }
+
+        public static List<string> RemoveFiles(ZbStatus st)
+        {
+            List<string> removed = new List<string>();
+            foreach (string n in new string[] { JarName, JarName + ".new", JarName + ".bak", DllName })
+            {
+                string p = Path.Combine(st.GameDir, n);
+                if (!File.Exists(p)) continue;
+                File.Delete(p);
+                removed.Add(n);
+                Log.W("Removed " + p);
+            }
+            return removed;
+        }
+
+        public static bool DeleteApprovals()
+        {
+            try
+            {
+                if (Directory.Exists(ApprovalsFolder)) Directory.Delete(ApprovalsFolder, true);
+                Log.W("Deleted " + ApprovalsFolder);
+                return true;
+            }
+            catch (Exception ex) { Log.W("Could not delete " + ApprovalsFolder + ": " + ex.Message); return false; }
+        }
+
+        // ---- Game file (vmArgs) ----
+        // Finds a ZombieBuddy entry ("...") inside "vmArgs". Returns the opening quote's position or -1.
+        public static int FindJsonEntry(string t, out int end, out string arg)
+        {
+            end = 0; arg = null;
+            int v = t.IndexOf("\"vmArgs\"", StringComparison.Ordinal);
+            if (v < 0) return -1;
+            int b = t.IndexOf('[', v);
+            if (b < 0) return -1;
+            for (int p = b + 1; p < t.Length && t[p] != ']'; p++)
+            {
+                if (t[p] != '"') continue;
+                int s = p + 1, e = s;
+                while (e < t.Length && t[e] != '"') { if (t[e] == '\\') e++; e++; }
+                if (e >= t.Length) return -1;
+                string val = t.Substring(s, e - s);
+                if (IsZbArg(val)) { end = e + 1; arg = val; return p; }
+                p = e;
+            }
+            return -1;
+        }
+
+        // Removes the list entry from q (opening quote) to e (after the closing quote), keeping valid JSON.
+        public static string RemoveJsonEntry(string t, int q, int e)
+        {
+            int ls = q;
+            while (ls > 0 && t[ls - 1] != '\n') ls--;
+            bool wsBefore = true;
+            for (int i = ls; i < q; i++) if (t[i] != ' ' && t[i] != '\t') wsBefore = false;
+            int a = e;
+            while (a < t.Length && (t[a] == ' ' || t[a] == '\t')) a++;
+            bool commaAfter = a < t.Length && t[a] == ',';
+            if (commaAfter) a++;
+            while (a < t.Length && (t[a] == ' ' || t[a] == '\t')) a++;
+            int lineEnd = a;
+            if (lineEnd < t.Length && t[lineEnd] == '\r') lineEnd++;
+            bool atEol = lineEnd < t.Length && t[lineEnd] == '\n';
+
+            if (wsBefore && atEol)
+            {
+                string o = t.Remove(ls, lineEnd + 1 - ls);
+                if (!commaAfter)
+                {
+                    int c = ls - 1;
+                    while (c >= 0 && " \t\r\n".IndexOf(o[c]) >= 0) c--;
+                    if (c >= 0 && o[c] == ',') o = o.Remove(c, 1);
+                }
+                return o;
+            }
+            if (commaAfter) return t.Remove(q, a - q);
+            int cc = q - 1;
+            while (cc >= 0 && (t[cc] == ' ' || t[cc] == '\t')) cc--;
+            if (cc >= 0 && t[cc] == ',') return t.Remove(cc, e - cc);
+            return t.Remove(q, e - q);
+        }
+
+        // Puts arg first in vmArgs (replacing an older ZombieBuddy entry), or removes it (arg == null).
+        public static string SetJsonEntry(string t, string arg)
+        {
+            int end; string old;
+            int q = FindJsonEntry(t, out end, out old);
+            if (arg != null && q >= 0 && old == arg) return t;
+            if (q >= 0) t = RemoveJsonEntry(t, q, end);
+            if (arg == null) return t;
+            int v = t.IndexOf("\"vmArgs\"", StringComparison.Ordinal);
+            int b = v < 0 ? -1 : t.IndexOf('[', v);
+            if (b < 0) throw new InvalidDataException("The game file has no vmArgs list.");
+            int f = b + 1;
+            while (f < t.Length && " \t\r\n".IndexOf(t[f]) >= 0) f++;
+            if (f < t.Length && t[f] == ']') return t.Insert(f, "\"" + arg + "\"");
+            bool ownLine = t.IndexOf('\n', b + 1, f - b - 1) >= 0;
+            if (!ownLine) return t.Insert(f, "\"" + arg + "\", ");
+            int ls = f;
+            while (ls > 0 && t[ls - 1] != '\n') ls--;
+            string nl = t.Contains("\r\n") ? "\r\n" : "\n";
+            return t.Insert(f, "\"" + arg + "\"," + nl + t.Substring(ls, f - ls));
+        }
+
+        // ---- ProjectZomboid64.bat (Alternate Launch): SET _JAVA_OPTIONS=... ----
+        static bool ContainsZbArg(string opts)
+        {
+            foreach (string f in opts.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                if (IsZbArg(f)) return true;
+            return false;
+        }
+
+        // The value of "SET _JAVA_OPTIONS=" in the .bat, or null if there is no such line.
+        public static string BatJavaOptions(string text)
+        {
+            foreach (string line in text.Replace("\r\n", "\n").Split('\n'))
+            {
+                string l = line.TrimStart(' ', '\t');
+                if (l.StartsWith("SET _JAVA_OPTIONS=", StringComparison.OrdinalIgnoreCase))
+                    return l.Substring(18).Trim();
+            }
+            return null;
+        }
+
+        // Same rules as ZombieBuddy's installer. arg == null removes it. Returns the new text.
+        public static string SetBat(string text, string arg)
+        {
+            string nl = text.Contains("\r\n") ? "\r\n" : "\n";
+            List<string> lines = new List<string>(text.Replace("\r\n", "\n").Split('\n'));
+            bool found = false;
+            for (int i = 0; i < lines.Count; i++)
+            {
+                string line = lines[i];
+                string l = line.TrimStart(' ', '\t');
+                if (!l.StartsWith("SET _JAVA_OPTIONS=", StringComparison.OrdinalIgnoreCase)) continue;
+                found = true;
+                List<string> keep = new List<string>();
+                foreach (string f in l.Substring(18).Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries))
+                    if (!IsZbArg(f)) keep.Add(f);
+                if (arg != null) keep.Insert(0, arg);
+                lines[i] = line.Substring(0, line.Length - l.Length) + "SET _JAVA_OPTIONS=" + string.Join(" ", keep.ToArray());
+                break;
+            }
+            if (!found && arg != null) lines.Insert(0, "SET _JAVA_OPTIONS=" + arg);
+            return string.Join(nl, lines.ToArray());
+        }
+
+        // ---- Steam launch options (same rules as ZombieBuddy's installer) ----
+        public static string SetSteamOptions(string cur, string arg)
+        {
+            // take out any ZombieBuddy agent, and the "--" right after it when nothing follows that
+            List<string> tok = new List<string>(cur.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries));
+            List<string> rest = new List<string>();
+            for (int i = 0; i < tok.Count; i++)
+            {
+                if (IsZbArg(tok[i]))
+                {
+                    if (i + 1 == tok.Count - 1 && tok[i + 1] == "--") i++;
+                    continue;
+                }
+                rest.Add(tok[i]);
+            }
+            if (rest.Count == 1 && rest[0] == "--") rest.Clear();
+            if (arg == null) return string.Join(" ", rest.ToArray());
+            int cmd = rest.IndexOf("%command%");
+            if (rest.Count == 0) return arg + " --";
+            if (cmd >= 0) { rest.Insert(cmd + 1, arg); rest.Insert(cmd + 2, "--"); return string.Join(" ", rest.ToArray()); }
+            if (rest.Contains("--")) return arg + " " + string.Join(" ", rest.ToArray());   // stay in front of the existing "--"
+            return arg + " -- " + string.Join(" ", rest.ToArray());
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    //  ZombieBuddy window: Workshop step, where to switch it on, Advanced
+    //  options, Install / Uninstall / Close.
+    // -------------------------------------------------------------------------
+    class ZombieBuddyForm : ThemedForm
+    {
+        readonly string jsonPath;
+        readonly MainForm owner;
+        ZbStatus st;
+        int channel;
+        bool advanced, busy;
+
+        Label lblTitle = new Label(), lblIntro = new Label(), lblStep1 = new Label(), lblWs = new Label();
+        Button btnSubscribe = new Button();
+        RadioButton rbStable = new RadioButton(), rbBeta = new RadioButton();
+        Label lblStep2 = new Label();
+        CheckBox chkJson = new CheckBox(), chkBat = new CheckBox(), chkSteam = new CheckBox();
+        Label lblJson = new Label(), lblBat = new Label(), lblSteamDesc = new Label();
+        Label lblNow = new Label();
+        LinkLabel lnkAdv = new LinkLabel();
+        Label lblPolicy = new Label(), lblVerb = new Label(), lblArgNote = new Label();
+        ComboBox cboPolicy = new ComboBox(), cboVerb = new ComboBox();
+        CheckBox chkApprovals = new CheckBox();
+        Button btnInstall = new Button(), btnUninstall = new Button(), btnClose = new Button();
+        System.Windows.Forms.Timer watch = new System.Windows.Forms.Timer();
+
+        const int W = 600;
+        int advTop;
+
+        public ZombieBuddyForm(string jsonPath, MainForm owner)
+        {
+            this.jsonPath = jsonPath;
+            this.owner = owner;
+            Text = "PZ Memory Tool - ZombieBuddy";
+            FormBorderStyle = FormBorderStyle.FixedDialog;
+            MaximizeBox = false; MinimizeBox = false;
+            StartPosition = FormStartPosition.CenterParent;
+            ShowInTaskbar = false;
+
+            int x = 20, w = W - 40, y = 14;
+            lblTitle.Text = "ZombieBuddy";
+            lblTitle.Font = Ui.Font(12f, FontStyle.Bold);
+            Ui.Place(lblTitle, x, y, w, 26); y += 30;
+            lblIntro.Text = "ZombieBuddy lets Project Zomboid load Java mods. It's made by Zed (github.com/zed-0xff/ZombieBuddy), " +
+                            "not by ComfyPlacebo. Java mods have full access to your computer, so ZombieBuddy asks before it " +
+                            "loads each new one: only allow mods you trust.";
+            lblIntro.Tag = "sub"; lblIntro.Font = Ui.Font(9f);
+            Ui.Place(lblIntro, x, y, w, 64); y += 68;
+
+            // Step 1: Workshop
+            lblStep1.Text = "1.  Subscribe to ZombieBuddy on the Steam Workshop";
+            lblStep1.Font = Ui.Font(10f, FontStyle.Bold);
+            Ui.Place(lblStep1, x, y, w, 22); y += 26;
+            Ui.Place(lblWs, x, y, w - 200, 40);
+            btnSubscribe.Text = "Subscribe on Workshop";
+            btnSubscribe.Tag = "primary";
+            Ui.Place(btnSubscribe, x + w - 190, y, 190, 32);
+            btnSubscribe.Click += delegate { OpenWorkshop(); };
+            rbStable.Text = "Stable"; rbBeta.Text = "Beta";
+            Ui.Place(rbStable, x + 330, y - 2, 110, 24);
+            Ui.Place(rbBeta, x + 445, y - 2, 120, 24);
+            rbStable.CheckedChanged += delegate { if (rbStable.Checked) channel = 0; UpdateUi(); };
+            rbBeta.CheckedChanged += delegate { if (rbBeta.Checked) channel = 1; UpdateUi(); };
+            y += 46;
+
+            // Step 2: where to switch it on
+            lblStep2.Text = "2.  Choose where to switch it on";
+            lblStep2.Font = Ui.Font(10f, FontStyle.Bold);
+            Ui.Place(lblStep2, x, y, w, 22); y += 26;
+            chkJson.Text = "Game file (ProjectZomboid64.json)";
+            Ui.Place(chkJson, x, y, w, 24); y += 24;
+            lblJson.Text = "Normal launch: Project Zomboid reads this every time it starts.";
+            lblJson.Tag = "sub"; lblJson.Font = Ui.Font(8.5f);
+            Ui.Place(lblJson, x + 20, y, w - 20, 18); y += 24;
+            chkBat.Text = "Alternate Launch (ProjectZomboid64.bat)";
+            Ui.Place(chkBat, x, y, w, 24); y += 24;
+            lblBat.Text = "Used when you pick \"Alternate Launch\" when you press Play in Steam.";
+            lblBat.Tag = "sub"; lblBat.Font = Ui.Font(8.5f);
+            Ui.Place(lblBat, x + 20, y, w - 20, 18); y += 24;
+            chkSteam.Text = "Steam launch options";
+            Ui.Place(chkSteam, x, y, w, 24); y += 24;
+            lblSteamDesc.Text = "Steam is closed while this is changed, then opened again.";
+            lblSteamDesc.Tag = "sub"; lblSteamDesc.Font = Ui.Font(8.5f);
+            Ui.Place(lblSteamDesc, x + 20, y, w - 20, 18); y += 28;
+            foreach (CheckBox c in new CheckBox[] { chkJson, chkBat, chkSteam }) c.CheckedChanged += delegate { UpdateButtons(); };
+
+            Ui.Place(lblNow, x, y, w, 22); y += 28;
+
+            // Advanced (the window grows to show it)
+            lnkAdv.LinkBehavior = LinkBehavior.HoverUnderline;
+            Ui.Place(lnkAdv, x, y, 160, 22);
+            lnkAdv.LinkClicked += delegate { advanced = !advanced; Log.W("Advanced " + (advanced ? "opened" : "closed")); Arrange(); };
+            y += 28;
+            advTop = y;
+            lblPolicy.Text = "Approval policy:";
+            cboPolicy.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboPolicy.Items.AddRange(new object[] { "Ask me for each new mod (recommended)", "Only load mods I already approved" });
+            lblVerb.Text = "Log detail:";
+            cboVerb.DropDownStyle = ComboBoxStyle.DropDownList;
+            cboVerb.Items.AddRange(new object[] { "Normal", "Debug (patch details)", "Trace (everything)" });
+            lblArgNote.Tag = "sub"; lblArgNote.Font = Ui.Font(8.5f);
+            lblArgNote.Text = "These go after the ZombieBuddy option, e.g. -agentlib:zbNative=policy=deny-new";
+            cboPolicy.SelectedIndexChanged += delegate { UpdateButtons(); };
+            cboVerb.SelectedIndexChanged += delegate { UpdateButtons(); };
+
+            chkApprovals.Text = "When uninstalling, also delete saved mod approvals";
+            btnInstall.Tag = "primary";
+            btnInstall.Font = Ui.Font(10f, FontStyle.Bold);
+            btnInstall.Click += delegate { Install(); };
+            btnUninstall.Text = "Uninstall";
+            btnUninstall.Click += delegate { Uninstall(); };
+            btnClose.Text = "Close";
+            btnClose.Click += delegate { Close(); };
+            CancelButton = btnClose;
+
+            Controls.AddRange(new Control[] { lblTitle, lblIntro, lblStep1, lblWs, btnSubscribe, rbStable, rbBeta, lblStep2,
+                chkJson, lblJson, chkBat, lblBat, chkSteam, lblSteamDesc, lblNow, lnkAdv, lblPolicy, cboPolicy, lblVerb, cboVerb,
+                lblArgNote, chkApprovals, btnInstall, btnUninstall, btnClose });
+
+            // Start from what is installed now
+            st = Zb.Scan(jsonPath);
+            channel = st.WsFound[0] || !st.WsFound[1] ? 0 : 1;
+            rbStable.Checked = channel == 0; rbBeta.Checked = channel == 1;
+            bool steamOk = SteamLaunchOptions.ConfigFiles().Count > 0;
+            chkJson.Checked = true;
+            chkBat.Checked = st.BatExists;
+            chkSteam.Checked = steamOk;
+            chkSteam.Enabled = steamOk;
+            if (!steamOk) lblSteamDesc.Text = "Not available: your Steam account's settings weren't found.";
+            string cur = st.JsonArg + " " + st.SteamOpts;
+            cboPolicy.SelectedIndex = cur.Contains("policy=deny-new") ? 1 : 0;
+            Match vm = Regex.Match(cur, @"verbosity=(\d)");
+            cboVerb.SelectedIndex = vm.Success ? Math.Min(2, int.Parse(vm.Groups[1].Value)) : 0;
+            advanced = cboPolicy.SelectedIndex != 0 || cboVerb.SelectedIndex != 0;
+            Arrange();
+            UpdateUi();
+
+            // Notice by itself when Steam has downloaded ZombieBuddy (or anything changes)
+            watch.Interval = 2000;
+            watch.Tick += delegate { if (busy) return; bool had = st.AnyWorkshop; st = Zb.Scan(jsonPath);
+                                     if (!had && st.AnyWorkshop) { Log.W("Workshop download appeared"); channel = st.WsFound[0] ? 0 : 1; }
+                                     UpdateUi(); };
+            watch.Start();
+        }
+
+        // Positions the Advanced options and the bottom row; resizes the window.
+        void Arrange()
+        {
+            int x = 20, w = W - 40, y = advTop;
+            lnkAdv.Text = (advanced ? "▼" : "►") + "  Advanced";
+            foreach (Control c in new Control[] { lblPolicy, cboPolicy, lblVerb, cboVerb, lblArgNote }) c.Visible = advanced;
+            if (advanced)
+            {
+                Ui.Place(lblPolicy, x + 16, y + 4, 130, 22);
+                Ui.Place(cboPolicy, x + 150, y, 300, 28); y += 36;
+                Ui.Place(lblVerb, x + 16, y + 4, 130, 22);
+                Ui.Place(cboVerb, x + 150, y, 300, 28); y += 36;
+                Ui.Place(lblArgNote, x + 16, y, w - 16, 20); y += 26;
+            }
+            Ui.Place(chkApprovals, x, y, w, 24);
+            y += 34;
+            Ui.Place(btnInstall, x, y, 150, 34);
+            Ui.Place(btnUninstall, x + 160, y, 130, 34);
+            Ui.Place(btnClose, W - 20 - 110, y, 110, 34);
+            y += 34 + 16;
+            ClientSize = new Size(Ui.S(W), Ui.S(y));
+            Theme.Apply(this);
+        }
+
+        void UpdateUi()
+        {
+            if (st.AnyWorkshop)
+            {
+                string v = st.WsVer[channel];
+                lblWs.Text = "✓  Subscribed and downloaded" + (v.Length > 0 ? " (v" + v + ")" : "");
+                lblWs.Tag = "note";
+                btnSubscribe.Visible = false;
+                rbStable.Visible = rbBeta.Visible = st.WsFound[0] && st.WsFound[1];
+                rbStable.Text = "Stable v" + st.WsVer[0];
+                rbBeta.Text = "Beta v" + st.WsVer[1];
+            }
+            else
+            {
+                lblWs.Text = "Not subscribed yet. Subscribe in Steam: this window notices by itself when Steam has downloaded it.";
+                lblWs.Tag = "warn";
+                btnSubscribe.Visible = true;
+                rbStable.Visible = rbBeta.Visible = false;
+            }
+            chkBat.Enabled = st.BatExists;
+            if (!st.BatExists) { chkBat.Checked = false; lblBat.Text = "ProjectZomboid64.bat wasn't found in the game folder."; }
+            string where = (st.InJson ? "  |  in game file" : "") + (st.InBat ? "  |  in Alternate Launch" : "") +
+                           (st.InSteam ? "  |  in Steam launch options" : "");
+            lblNow.Text = "Now: " + Zb.StatusText(st) + where;
+            chkApprovals.Visible = st.ApprovalsExist;
+            Theme.Apply(this);
+            UpdateButtons();
+        }
+
+        void UpdateButtons()
+        {
+            btnInstall.Text = st.AnyInstalled ? "Install / Update" : "Install";
+            btnInstall.Enabled = st.AnyWorkshop && (chkJson.Checked || chkBat.Checked || chkSteam.Checked);
+            btnUninstall.Enabled = st.AnyInstalled;
+        }
+
+        void OpenWorkshop()
+        {
+            string url = "steam://url/CommunityFilePage/" + Zb.ModId;
+            Log.W("Opening " + url);
+            try
+            {
+                ProcessStartInfo psi = new ProcessStartInfo(url);
+                psi.UseShellExecute = true;
+                Process.Start(psi);
+            }
+            catch
+            {
+                try
+                {
+                    ProcessStartInfo psi = new ProcessStartInfo("https://steamcommunity.com/sharedfiles/filedetails/?id=" + Zb.ModId);
+                    psi.UseShellExecute = true;
+                    Process.Start(psi);
+                }
+                catch { }
+            }
+        }
+
+        string AgentArg() { return Zb.MakeArg(cboPolicy.SelectedIndex, cboVerb.SelectedIndex); }
+
+        // Adds (arg) or removes (null) ZombieBuddy in Steam's launch options: closes Steam first, opens it again after.
+        string SteamStep(string arg)
+        {
+            List<string> files = SteamLaunchOptions.ConfigFiles();
+            if (files.Count == 0) return "Steam launch options: not changed (Steam's settings weren't found).";
+            bool wasRunning = ProcessGuard.IsRunning(Settings.SteamProcessName);
+            if (!ProcessGuard.EnsureSteamClosed(arg != null ? "add ZombieBuddy to" : "remove ZombieBuddy from",
+                                                "skip the Steam launch options"))
+                return "Steam launch options: skipped (Steam was still running).";
+            List<string> r = new List<string>();
+            foreach (string f in files)
+            {
+                try
+                {
+                    int rc = SteamLaunchOptions.Edit(f, delegate (string cur) { return Zb.SetSteamOptions(cur, arg); }, Zb.BackupSuffix);
+                    r.Add(rc == 1 ? (arg != null ? "Steam launch options: ZombieBuddy added." : "Steam launch options: ZombieBuddy removed.")
+                                  : rc == 0 ? (arg != null ? "Steam launch options: already set." : "Steam launch options: nothing to remove.")
+                                            : "Steam launch options: could NOT be changed.");
+                }
+                catch (Exception ex) { r.Add("Steam launch options: could NOT be changed (" + ex.Message + ")."); }
+            }
+            if (wasRunning && SteamLaunchOptions.StartSteam()) r.Add("Steam was started again.");
+            return string.Join("\n", r.ToArray());
+        }
+
+        void Install()
+        {
+            string arg = AgentArg();
+            string v = st.WsVer[channel];
+            string changes = "ZombieBuddy will make these changes:\n\n" +
+                "  - Copy ZombieBuddy.jar" + (v.Length > 0 ? " v" + v : "") + " and zbNative.dll (Workshop" +
+                (channel == 1 ? ", beta" : "") + ") into the game folder:\n    " + st.GameDir + "\n" +
+                (chkJson.Checked ? "  - Game file: add " + arg + "\n" : "") +
+                (chkBat.Checked ? "  - Alternate Launch (ProjectZomboid64.bat): add " + arg + "\n" : "") +
+                (chkSteam.Checked ? "  - Steam launch options: add \"" + arg + " --\"" +
+                    (ProcessGuard.IsRunning(Settings.SteamProcessName) ? " (Steam is closed first and opened again after)" : "") + "\n" : "") +
+                (!chkJson.Checked && st.InJson ? "  - Game file: remove ZombieBuddy (not ticked)\n" : "") +
+                (!chkBat.Checked && st.InBat ? "  - Alternate Launch: remove ZombieBuddy (not ticked)\n" : "") +
+                (!chkSteam.Checked && st.InSteam ? "  - Steam launch options: remove ZombieBuddy (not ticked)\n" : "");
+            if (Msg.Show(changes, "PZ Memory Tool - Install ZombieBuddy", MessageBoxButtons.OKCancel, MessageBoxIcon.Question)
+                != DialogResult.OK) return;
+            if (!ProcessGuard.EnsureGameClosed()) return;
+
+            busy = true;
+            List<string> report = new List<string>();
+            try
+            {
+                st = Zb.Scan(jsonPath);
+                Zb.CopyFiles(st, channel);
+                report.Add("Copied ZombieBuddy.jar" + (v.Length > 0 ? " v" + v : "") + " and zbNative.dll into the game folder.");
+
+                string jt = File.ReadAllText(jsonPath);
+                string jn = Zb.SetJsonEntry(jt, chkJson.Checked ? arg : null);
+                if (jn != jt)
+                {
+                    File.WriteAllText(jsonPath, jn);
+                    report.Add(chkJson.Checked ? "Game file: ZombieBuddy added." : "Game file: ZombieBuddy removed.");
+                }
+                else if (chkJson.Checked) report.Add("Game file: already set.");
+                Log.FileContents("Game file after ZombieBuddy install", jsonPath, 6000);
+
+                string bat = Zb.BatPath(st.GameDir);
+                if (File.Exists(bat))
+                {
+                    string bt = File.ReadAllText(bat);
+                    string bn = Zb.SetBat(bt, chkBat.Checked ? arg : null);
+                    if (bn != bt)
+                    {
+                        File.WriteAllText(bat, bn);
+                        report.Add(chkBat.Checked ? "Alternate Launch: ZombieBuddy added." : "Alternate Launch: ZombieBuddy removed.");
+                        Log.W("Alternate Launch .bat: _JAVA_OPTIONS now \"" + Zb.BatJavaOptions(bn) + "\"");
+                    }
+                    else if (chkBat.Checked) report.Add("Alternate Launch: already set.");
+                }
+            }
+            catch (UnauthorizedAccessException)
+            {
+                busy = false;
+                Log.W("Install: no permission to change the game folder");
+                Close();
+                owner.OfferAdminRelaunch();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.W("Install failed: " + ex);
+                report.Add("Install failed: " + ex.Message);
+            }
+
+            if (chkSteam.Checked || st.InSteam)
+                report.Add(SteamStep(chkSteam.Checked ? arg : null));
+            Finish(report);
+        }
+
+        void Uninstall()
+        {
+            bool approvals = chkApprovals.Visible && chkApprovals.Checked;
+            string list = "This removes ZombieBuddy:\n\n  - ZombieBuddy.jar and zbNative.dll from the game folder\n" +
+                (st.InJson ? "  - Game file: remove " + st.JsonArg + "\n" : "") +
+                (st.InBat ? "  - Alternate Launch: remove ZombieBuddy\n" : "") +
+                (st.InSteam ? "  - Steam launch options: remove ZombieBuddy" +
+                    (ProcessGuard.IsRunning(Settings.SteamProcessName) ? " (Steam is closed first and opened again after)" : "") + "\n" : "") +
+                (approvals ? "  - Saved mod approvals (" + Zb.ApprovalsFolder + ")\n" : "") +
+                "\nMods that need ZombieBuddy will stop working. Your other mods and settings stay as they are.";
+            if (Msg.Show(list, "PZ Memory Tool - Uninstall ZombieBuddy", MessageBoxButtons.OKCancel, MessageBoxIcon.Warning,
+                         MessageBoxDefaultButton.Button2) != DialogResult.OK) return;
+            if (!ProcessGuard.EnsureGameClosed()) return;
+
+            busy = true;
+            List<string> report = new List<string>();
+            try
+            {
+                st = Zb.Scan(jsonPath);
+                List<string> removed = Zb.RemoveFiles(st);
+                report.Add(removed.Count > 0 ? "Removed " + string.Join(", ", removed.ToArray()) + " from the game folder."
+                                             : "No ZombieBuddy files were in the game folder.");
+                string jt = File.ReadAllText(jsonPath);
+                string jn = Zb.SetJsonEntry(jt, null);
+                if (jn != jt) { File.WriteAllText(jsonPath, jn); report.Add("Game file: ZombieBuddy removed."); }
+                string bat = Zb.BatPath(st.GameDir);
+                if (File.Exists(bat))
+                {
+                    string bt = File.ReadAllText(bat), bn = Zb.SetBat(bt, null);
+                    if (bn != bt) { File.WriteAllText(bat, bn); report.Add("Alternate Launch: ZombieBuddy removed."); }
+                }
+                if (approvals) report.Add(Zb.DeleteApprovals() ? "Saved mod approvals: deleted." : "Saved mod approvals: could NOT be deleted.");
+            }
+            catch (UnauthorizedAccessException)
+            {
+                busy = false;
+                Close();
+                owner.OfferAdminRelaunch();
+                return;
+            }
+            catch (Exception ex)
+            {
+                Log.W("Uninstall failed: " + ex);
+                report.Add("Uninstall failed: " + ex.Message);
+            }
+            if (st.InSteam) report.Add(SteamStep(null));
+            Finish(report);
+        }
+
+        void Finish(List<string> report)
+        {
+            st = Zb.Scan(jsonPath);
+            report.Add("\nZombieBuddy now: " + Zb.StatusText(st) + ".");
+            Msg.Show(string.Join("\n", report.ToArray()), "PZ Memory Tool - ZombieBuddy", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            busy = false;
+            UpdateUi();
+        }
+
+        protected override void OnFormClosed(FormClosedEventArgs e)
+        {
+            watch.Stop();
+            Log.W("ZombieBuddy window closed");
+            base.OnFormClosed(e);
+        }
+
+        protected override void Dispose(bool disposing)
+        {
+            if (disposing) watch.Dispose();
+            base.Dispose(disposing);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     //  Main window
     // -------------------------------------------------------------------------
     class MainForm : ThemedForm
@@ -1727,10 +2845,15 @@ namespace PZMemoryTool
         Button btnRestore = new Button();
         Button btnClose = new Button();
 
+        TitledBox boxZb = new TitledBox();
+        Label lblZbStatus = new Label();
+        Button btnZb = new Button();
+
         TitledBox boxConsole = new TitledBox();
         Label lblConsoleInfo = new Label();
         Label lblConsoleStatus = new Label();
         Button btnCopyConsole = new Button();
+        Button btnCopyText = new Button();
 
         // -Xms to save: the selected minimum when the box is ticked, otherwise none (0).
         // 8 GB systems: the box is locked off, so always none.
@@ -1750,9 +2873,9 @@ namespace PZMemoryTool
 
             const int W = 640;   // layout is designed at 100% scaling; Ui.S / Ui.Place scale it
             const int LeftW = 410;   // width of the left column (the Console Copier box is on the right)
-            int BoxX = 435;          // Console Copier box; moved right if "Use recommended" needs the room
-            const int BoxH = 272;
-            Text = "PZ Memory Tool v" + Settings.Version + " - Now with Console copier!!";
+            int BoxX = 435;          // ZombieBuddy + Console Copier boxes; moved right if "Use recommended" needs the room
+            Text = "PZ Memory Tool v" + Settings.Version + " - Now with ZombieBuddy installer!!";
+            KeyPreview = true;   // F12 copies the log
             FormBorderStyle = FormBorderStyle.FixedDialog;
             MaximizeBox = false;
             StartPosition = FormStartPosition.CenterScreen;
@@ -1781,8 +2904,8 @@ namespace PZMemoryTool
             Ui.Place(lblSteamNote, 15, y, W - 30, 20);
             lblSteamNote.Font = Ui.Font(8.5f); y += 28;
 
+            int installedY = y;      // the ZombieBuddy box starts level with this line
             Ui.Place(lblInstalled, 15, y, LeftW, 24); lblInstalled.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
-            int regionTop = y;       // the Console Copier box is centred beside this line ... 
             Ui.Place(lblCurrent, 15, y, LeftW + 10, 24); lblCurrent.Font = Ui.Font(11f, FontStyle.Bold); y += 28;
             Ui.Place(lblRecommend, 15, y, LeftW + 10, 24); y += 26;
             y += 8;
@@ -1843,28 +2966,42 @@ namespace PZMemoryTool
             lnkKofi.LinkClicked += delegate { OpenKofi(); };
             y += 30;
 
-            // Console Copier box: right side, centred beside "Current allocation" ... Ko-fi link
+            // Right side: the ZombieBuddy box, with the Console Copier box under it
             int regionBottom = y - 6;
             BoxX = Math.Min(MaxBoxX, Math.Max(BoxX, leftRight + 15));
-            int boxW = W - 20 - BoxX, boxH = BoxH;
-            int boxTop = regionTop + (regionBottom - regionTop - boxH) / 2;
+            int boxW = W - 20 - BoxX;
+            const int ZbH = 94;
+            Ui.Place(boxZb, BoxX, installedY, boxW, ZbH);
+            boxZb.Title = "ZombieBuddy";
+            boxZb.TitleFont = MonoFont(10f, FontStyle.Bold);
+            Ui.Place(lblZbStatus, 8, 24, boxW - 16, 18);
+            lblZbStatus.Tag = "sub";
+            lblZbStatus.Font = Ui.Font(8.5f);
+            lblZbStatus.TextAlign = ContentAlignment.TopCenter;
+            Ui.Place(btnZb, 12, 46, boxW - 24, 34);
+            btnZb.Click += delegate { OpenZombieBuddy(); };
+            boxZb.Controls.AddRange(new Control[] { lblZbStatus, btnZb });
+
+            int boxTop = installedY + ZbH + 6, boxH = regionBottom - boxTop;
             Ui.Place(boxConsole, BoxX, boxTop, boxW, boxH);
             boxConsole.Title = "Console Copier";
             boxConsole.TitleFont = MonoFont(10f, FontStyle.Bold);
-            Ui.Place(lblConsoleInfo, 14, 30, boxW - 28, 122);
-            lblConsoleInfo.Text = "Copies Project Zomboid's console.txt log file to your clipboard.\n\n" +
-                                  "Paste it into Discord, a message or a folder with right click or Ctrl+V.";
+            Ui.Place(lblConsoleInfo, 12, 28, boxW - 24, 74);
+            lblConsoleInfo.Text = "Copies console.txt to your clipboard as a file or as text. Paste it with right click or Ctrl+V.";
             lblConsoleInfo.Font = Ui.Font(9f);
             lblConsoleInfo.TextAlign = ContentAlignment.TopCenter;
-            Ui.Place(lblConsoleStatus, 10, boxH - 112, boxW - 20, 54);
+            Ui.Place(lblConsoleStatus, 8, boxH - 146, boxW - 16, 50);
             lblConsoleStatus.Tag = "note";
             lblConsoleStatus.Font = Ui.Font(8.5f);
             lblConsoleStatus.TextAlign = ContentAlignment.BottomCenter;
             btnCopyConsole.Text = "Copy Console";
             int copyW = Math.Min(130, boxW - 24);
-            Ui.Place(btnCopyConsole, (boxW - copyW) / 2, boxH - 52, copyW, 34);
-            btnCopyConsole.Click += delegate { CopyConsole(); };
-            boxConsole.Controls.AddRange(new Control[] { lblConsoleInfo, lblConsoleStatus, btnCopyConsole });
+            Ui.Place(btnCopyConsole, (boxW - copyW) / 2, boxH - 92, copyW, 34);
+            btnCopyConsole.Click += delegate { CopyConsole(false); };
+            btnCopyText.Text = "Copy as text";
+            Ui.Place(btnCopyText, (boxW - copyW) / 2, boxH - 50, copyW, 34);
+            btnCopyText.Click += delegate { CopyConsole(true); };
+            boxConsole.Controls.AddRange(new Control[] { lblConsoleInfo, lblConsoleStatus, btnCopyConsole, btnCopyText });
 
             btnSave.Text = "Save";
             btnSave.Tag = "primary";
@@ -1885,9 +3022,45 @@ namespace PZMemoryTool
 
             Controls.AddRange(new Control[] { banner, title, lblPath, lblSteam, lblSteamNote, lblInstalled, lblCurrent,
                 lblRecommend, chkXms, cboXms, lblNew, cboGB, btnRecommended, lblWarning, lblNote, lnkKofi,
-                boxConsole, btnSave, btnRestore, btnClose, btnRefresh });
+                boxZb, boxConsole, btnSave, btnRestore, btnClose, btnRefresh });
 
             LoadValues();
+        }
+
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.F12) { CopyLog(); e.Handled = true; }
+            base.OnKeyDown(e);
+        }
+
+        // F12: the log as text on the clipboard, to paste into a message.
+        void CopyLog()
+        {
+            string t = Log.ReadAll();
+            try
+            {
+                if (string.IsNullOrEmpty(t)) throw new IOException("empty");
+                Clipboard.SetText(t);
+                lblConsoleStatus.Text = "Copied the log as text\n(" + Math.Max(1, t.Length / 1024) + " KB)";
+                Log.W("Log copied to the clipboard");
+            }
+            catch { lblConsoleStatus.Text = "Could not copy the log.\nIt is in " + Log.Folder; }
+        }
+
+        void OpenZombieBuddy()
+        {
+            Log.W("Opening the ZombieBuddy window");
+            using (ZombieBuddyForm f = new ZombieBuddyForm(jsonPath, this))
+                f.ShowDialog(this);
+            if (IsDisposed) return;   // closed for an administrator restart
+            LoadValues();
+        }
+
+        void UpdateZbBox()
+        {
+            ZbStatus z = Zb.Scan(jsonPath);
+            lblZbStatus.Text = Zb.StatusText(z);
+            btnZb.Text = z.AnyInstalled ? "ZombieBuddy options..." : "Install ZombieBuddy...";
         }
 
         // Measured pixel widths -> layout units at 100% scaling
@@ -1952,13 +3125,16 @@ namespace PZMemoryTool
             Match xms = XmxParser.FindXms(text);
             currentXmsMB = xms == null ? 0 : XmxParser.ToMB(xms);
             installedMB = SystemMemory.InstalledMB();
+            long usableMB = SystemMemory.UsableMB();
             CheckSteamLaunchOptions();
 
             double installedGB = installedMB / 1024.0;
             int installedWholeGB = (int)Math.Round(installedGB);
 
             // Never more than installed RAM minus 2 GB, never less than 5 GB
-            int maxGB = installedWholeGB - Settings.WindowsReserveGB;
+            int maxGB = installedWholeGB - Settings.WindowsReserveGB;   // 8 GB / 12 GB tiers (fixed choices)
+            // 16 GB and up: leave about 2 GB of headroom on top of Windows and Java's own needs
+            int capGB = installedWholeGB - (SystemMemory.IsWindows11() ? Settings.Win11ReserveGB : Settings.Win10ReserveGB);
 
             List<int> options = new List<int>();
             string recommendText;
@@ -1966,12 +3142,12 @@ namespace PZMemoryTool
             if (installedWholeGB >= Settings.Tier32)
             {
                 tier = 32; recommendedGB = 8; recommendText = "8 to 12 GB";
-                for (int gb = Settings.MinAllocGB; gb <= maxGB; gb++) options.Add(gb);
+                for (int gb = Settings.MinAllocGB; gb <= capGB; gb++) options.Add(gb);
             }
             else if (installedWholeGB >= Settings.Tier16)
             {
                 tier = 16; recommendedGB = 8; recommendText = "8 GB";
-                for (int gb = Settings.MinAllocGB; gb <= maxGB; gb++) options.Add(gb);
+                for (int gb = Settings.MinAllocGB; gb <= capGB; gb++) options.Add(gb);
             }
             else if (installedWholeGB >= Settings.Tier12)
             {
@@ -1989,7 +3165,8 @@ namespace PZMemoryTool
             }
 
             lblPath.Text = "File Found: " + jsonPath;
-            lblInstalled.Text = "Total installed memory:   " + installedGB.ToString("0.#") + " GB";
+            lblInstalled.Text = "Total installed memory:   " + installedWholeGB + " GB" +
+                                (usableMB > 0 ? "   (" + (usableMB / 1024.0).ToString("0.0") + " GB usable)" : "");
             lblCurrent.Text   = "Current allocation (-Xms / -Xmx):   " +
                                 (currentXmsMB > 0 ? XmxParser.Describe(currentXmsMB) : "not set") + " / " +
                                 XmxParser.Describe(currentMB);
@@ -2019,6 +3196,12 @@ namespace PZMemoryTool
             btnSave.Enabled = !locked;
             btnRestore.Enabled = !locked && (File.Exists(jsonPath + ".bak") || SteamRestoreAvailable());
             UpdateWarning();
+            UpdateZbBox();
+            Log.W("Memory: installed " + installedMB + " MB, usable " + usableMB + " MB | tier " + tier + ", choices [" +
+                  string.Join(",", options.ConvertAll(delegate (int g) { return g.ToString(); }).ToArray()) + "] GB, recommended " +
+                  recommendText + " | current -Xmx " + currentMB + " MB, -Xms " + currentXmsMB + " MB");
+            Log.W("Steam settings: " + (steamChecked ? string.Join(", ", SteamLaunchOptions.ConfigFiles().ToArray()) : "(not found)") +
+                  " | memory options in Steam: " + (steamEntries.Count > 0 ? lblSteam.Text : "none"));
         }
 
         void UpdateWarning()
@@ -2116,6 +3299,7 @@ namespace PZMemoryTool
 
             // Steam launch options with -Xmx / -Xms need Steam closed, or Steam writes them back
             CheckSteamLaunchOptions();
+            bool steamWasRunning = ProcessGuard.IsRunning(Settings.SteamProcessName);
             bool fixSteam = steamEntries.Count > 0 &&
                 ProcessGuard.EnsureSteamClosed("remove the memory settings from",
                     "save without changing the Steam launch options");
@@ -2145,9 +3329,10 @@ namespace PZMemoryTool
                              (xmsGB > 0 ? xmsGB + " GB   (-Xms" + (xmsGB * 1024) + "m)"
                                         : (tier == 8 ? "not set (8 GB system)" : "not set (turned off)")) + "\n" +
                              "     Maximum memory (-Xmx):   " + gb + " GB   (-Xmx" + (gb * 1024) + "m)\n\n" +
-                             SteamReport(fixSteam) + "\n\n" +
+                             SteamReport(fixSteam) + ReopenSteam(fixSteam && steamWasRunning) + "\n\n" +
                              "A backup of the original file is at:\n" + backup + verify;
-                MessageBox.Show(msg, "PZ Memory Tool", MessageBoxButtons.OK,
+                Log.FileContents("Game file after save", jsonPath, 6000);
+                Msg.Show(msg, "PZ Memory Tool", MessageBoxButtons.OK,
                     verify.Length == 0 ? MessageBoxIcon.Information : MessageBoxIcon.Warning);
                 LoadValues();
             }
@@ -2157,9 +3342,16 @@ namespace PZMemoryTool
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Could not save the file:\n" + ex.Message, "PZ Memory Tool",
+                Msg.Show("Could not save the file:\n" + ex.Message, "PZ Memory Tool",
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
+        }
+
+        // After the tool closed Steam: start it again.
+        static string ReopenSteam(bool wanted)
+        {
+            if (!wanted || ProcessGuard.IsRunning(Settings.SteamProcessName)) return "";
+            return SteamLaunchOptions.StartSteam() ? "\nSteam was started again." : "";
         }
 
         // Removes -Xmx / -Xms from the Steam launch options (if allowed) and describes what happened.
@@ -2195,9 +3387,9 @@ namespace PZMemoryTool
             return r;
         }
 
-        // Copies console.txt to the clipboard as a file (paste into Discord or a folder with Ctrl+V).
+        // Copies console.txt to the clipboard as a file (asText = false) or as its text (asText = true).
         // A snapshot is copied to a temp folder first, so the game can keep writing its log.
-        void CopyConsole()
+        void CopyConsole(bool asText)
         {
             string console = Path.Combine(Path.Combine(
                 Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Zomboid"), "console.txt");
@@ -2216,12 +3408,17 @@ namespace PZMemoryTool
                 using (FileStream dst = new FileStream(copy, FileMode.Create, FileAccess.Write))
                     src.CopyTo(dst);
 
-                System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
-                files.Add(copy);
-                Clipboard.SetFileDropList(files);
+                if (asText)
+                    Clipboard.SetText(File.ReadAllText(copy));
+                else
+                {
+                    System.Collections.Specialized.StringCollection files = new System.Collections.Specialized.StringCollection();
+                    files.Add(copy);
+                    Clipboard.SetFileDropList(files);
+                }
 
                 long kb = new FileInfo(copy).Length / 1024;
-                lblConsoleStatus.Text = "Copied console.txt\n(" + (kb >= 1024 ? (kb / 1024.0).ToString("0.0") + " MB" : kb + " KB") +
+                lblConsoleStatus.Text = (asText ? "Copied console.txt as text\n(" : "Copied console.txt\n(") + (kb >= 1024 ? (kb / 1024.0).ToString("0.0") + " MB" : kb + " KB") +
                                         ", " + File.GetLastWriteTime(console).ToString("t") + ")";
             }
             catch (Exception ex)
@@ -2241,7 +3438,7 @@ namespace PZMemoryTool
             }
             catch
             {
-                MessageBox.Show("Could not open your web browser. You can visit:\n" + Settings.KofiUrl,
+                Msg.Show("Could not open your web browser. You can visit:\n" + Settings.KofiUrl,
                     "PZ Memory Tool", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
         }
@@ -2254,26 +3451,33 @@ namespace PZMemoryTool
             bool steamBackup = SteamRestoreAvailable();
             if (!fileBackup && !steamBackup) return;
 
-            if (MessageBox.Show("Restore the original settings from the backup?\n\n" +
+            if (Msg.Show("Restore the original settings from the backup?\n\n" +
                     (fileBackup ? "  - the game file (ProjectZomboid64.json)\n" : "") +
                     (steamBackup ? "  - Project Zomboid's Steam launch options\n" : ""),
                     "PZ Memory Tool", MessageBoxButtons.YesNo, MessageBoxIcon.Question) != DialogResult.Yes) return;
             if (!ProcessGuard.EnsureGameClosed()) return;
 
+            bool steamWasRunning = ProcessGuard.IsRunning(Settings.SteamProcessName);
             bool doSteam = steamBackup && ProcessGuard.EnsureSteamClosed("restore",
                 "restore only the game file and leave the Steam launch options as they are");
 
             List<string> done = new List<string>();
+            ZbStatus zbBefore = Zb.Scan(jsonPath);   // the backups are older than ZombieBuddy: keep it switched on
             try
             {
                 if (fileBackup)
                 {
                     File.Copy(backup, jsonPath, true);
                     done.Add("Game file restored.");
+                    if (zbBefore.InJson)
+                    {
+                        string t = File.ReadAllText(jsonPath), n = Zb.SetJsonEntry(t, zbBefore.JsonArg);
+                        if (n != t) { File.WriteAllText(jsonPath, n); done.Add("ZombieBuddy was kept switched on in the game file."); }
+                    }
                 }
             }
             catch (UnauthorizedAccessException) { OfferAdminRelaunch(); return; }
-            catch (Exception ex) { MessageBox.Show("Restore failed:\n" + ex.Message, "PZ Memory Tool"); return; }
+            catch (Exception ex) { Msg.Show("Restore failed:\n" + ex.Message, "PZ Memory Tool"); return; }
 
             if (steamBackup)
             {
@@ -2285,21 +3489,30 @@ namespace PZMemoryTool
                     {
                         foreach (string f in SteamLaunchOptions.ConfigFiles())
                             if (SteamLaunchOptions.RestoreFromBackup(f))
+                            {
+                                string zbArg = null;
+                                foreach (string tok in zbBefore.SteamOpts.Split(' ')) if (zbBefore.InSteam && Zb.IsZbArg(tok)) zbArg = tok;
+                                if (zbArg != null &&
+                                    SteamLaunchOptions.Edit(f, delegate (string cur) { return Zb.SetSteamOptions(cur, zbArg); }, Zb.BackupSuffix) == 1)
+                                    done.Add("ZombieBuddy was kept in Steam's launch options.");
                                 done.Add("Steam launch options restored to: " + SteamLaunchOptions.CurrentValue(f));
+                            }
                     }
                     catch (Exception ex) { done.Add("Steam launch options could not be restored: " + ex.Message); }
+                    string again = ReopenSteam(steamWasRunning);
+                    if (again.Length > 0) done.Add(again.Trim());
                 }
             }
 
             LoadValues();
-            MessageBox.Show(string.Join("\n\n", done.ToArray()), "PZ Memory Tool",
+            Msg.Show(string.Join("\n\n", done.ToArray()), "PZ Memory Tool",
                 MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         // Files under Program Files need administrator rights to change.
-        void OfferAdminRelaunch()
+        public void OfferAdminRelaunch()
         {
-            if (MessageBox.Show("Windows needs administrator permission to change files in this folder.\n\n" +
+            if (Msg.Show("Windows needs administrator permission to change files in this folder.\n\n" +
                     "Restart this tool as administrator?", "PZ Memory Tool",
                     MessageBoxButtons.YesNo, MessageBoxIcon.Warning)
                 != DialogResult.Yes) return;

@@ -1,0 +1,135 @@
+# Preview builds, made by GitHub from the source in this branch (nothing is uploaded by hand).
+#
+#  - Windows: PZMemoryTool.exe as a download on the Actions run page ("Artifacts").
+#    It is NOT put on the Releases page.
+#  - Linux / SteamOS: published as the pre-release "v1.2.0-preview" on the Releases
+#    page (a .tar.gz and the bare program file), replaced on every push to this branch.
+#    Built with Zig against an old glibc (2.31), so it runs on older Linux / SteamOS too.
+#
+# Version numbers: the 4th number is the run number of this workflow (1.2.0.<run>),
+# so every preview build can be told apart. Product version: 1.2.0-preview.
+
+name: Preview builds
+
+on:
+  push:
+    branches: [preview]
+  workflow_dispatch:
+
+permissions:
+  contents: write   # needed to create / update the Linux pre-release
+
+env:
+  VERSION: 1.2.0
+  PRODUCT_VERSION: 1.2.0-preview
+  RELEASE_TAG: v1.2.0-preview
+  OLD_RELEASE_TAGS: v1.1.0-preview
+
+jobs:
+  windows:
+    name: Windows (Actions download only)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set the build number (${{ env.VERSION }}.${{ github.run_number }})
+        shell: pwsh
+        run: |
+          $f = "PZMemoryTool.cs"
+          $t = Get-Content $f -Raw
+          $t = $t -replace 'AssemblyFileVersion\("[0-9.]+"\)', "AssemblyFileVersion(""$env:VERSION.${{ github.run_number }}"")"
+          $t = $t -replace 'AssemblyInformationalVersion\("[^"]+"\)', "AssemblyInformationalVersion(""$env:PRODUCT_VERSION"")"
+          Set-Content $f $t -NoNewline -Encoding utf8
+
+      - name: Build with the C# compiler built into Windows (same as build.bat)
+        shell: cmd
+        run: |
+          "%WINDIR%\Microsoft.NET\Framework64\v4.0.30319\csc.exe" /nologo /target:winexe /platform:anycpu /optimize+ /out:PZMemoryTool.exe /win32manifest:PZMemoryTool.manifest /win32icon:PZMemoryTool.ico /r:System.Windows.Forms.dll /r:System.Drawing.dll PZMemoryTool.cs
+
+      - name: Checksum and version check
+        shell: pwsh
+        run: |
+          $v = (Get-Item PZMemoryTool.exe).VersionInfo
+          "File version:    $($v.FileVersion)"
+          "Product version: $($v.ProductVersion)"
+          $h = (Get-FileHash PZMemoryTool.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  PZMemoryTool.exe" | Out-File -Encoding ascii SHA256.txt
+          Get-Content SHA256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PZMemoryTool-${{ env.PRODUCT_VERSION }}-build${{ github.run_number }}-windows
+          path: |
+            PZMemoryTool.exe
+            SHA256.txt
+            README.md
+
+  linux:
+    name: Linux / SteamOS (pre-release)
+    # Ubuntu 22.04 = older system libraries, so the program also runs on older distributions
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential git libx11-dev libxrandr-dev libxinerama-dev \
+                                  libxcursor-dev libxi-dev libgl1-mesa-dev
+          pip install ziglang==0.17.1
+
+      - name: Build
+        run: PZMT_ZIG=1 PZMT_VERSION="$PRODUCT_VERSION" PZMT_BUILD="${{ github.run_number }}" sh linux/build.sh
+
+      - name: Check and package
+        run: |
+          cd linux
+          ./PZMemoryTool --version
+          echo "Needs glibc: $(objdump -T PZMemoryTool | grep -o 'GLIBC_[0-9.]*' | sort -Vu | tail -1)"
+          mkdir -p dist/PZMemoryTool
+          cp PZMemoryTool dist/PZMemoryTool/
+          cp ../README.md dist/PZMemoryTool/
+          tar -C dist -czf "dist/PZMemoryTool-$PRODUCT_VERSION-linux-steamos.tar.gz" PZMemoryTool
+          cp PZMemoryTool dist/PZMemoryTool-linux-steamos
+          cd dist
+          sha256sum "PZMemoryTool-$PRODUCT_VERSION-linux-steamos.tar.gz" PZMemoryTool-linux-steamos > SHA256.txt
+          cat SHA256.txt
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PZMemoryTool-${{ env.PRODUCT_VERSION }}-build${{ github.run_number }}-linux-steamos
+          path: |
+            linux/dist/*.tar.gz
+            linux/dist/PZMemoryTool-linux-steamos
+            linux/dist/SHA256.txt
+
+      - name: Publish the pre-release v1.2.0-preview
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd linux/dist
+          cat > notes.md <<EOF
+          **Preview build for Linux / SteamOS (Steam Deck, Steam Machine and Linux PCs).** Build ${{ github.run_number }}, from commit ${GITHUB_SHA::7}.
+
+          This is a test version. The finished Windows version is [v1.1.0](https://github.com/${{ github.repository }}/releases/tag/v1.1.0).
+
+          **New in 1.2.0-preview:** ZombieBuddy installer (from the Steam Workshop download, switched on in the game file), a log file of what the tool does (F12 or the controller's View button copies it), Steam account detection fixes, finds the game file one folder deeper on Linux, Steam is opened again after the tool closed it.
+
+          **Downloads**
+          - \`PZMemoryTool-$PRODUCT_VERSION-linux-steamos.tar.gz\` – recommended: keeps the "can run" permission. Extract, then open \`PZMemoryTool\`.
+          - \`PZMemoryTool-linux-steamos\` – the bare program file. After downloading, allow it to run: right-click > Properties > Permissions > "Allow executing file as program" (or \`chmod +x\`).
+
+          Instructions (Steam Deck Game Mode / Desktop Mode, security prompts, memory rules): see the README on the [preview branch](https://github.com/${{ github.repository }}/tree/preview#linux--steamos).
+
+          **SHA256**
+          \`\`\`
+          $(cat SHA256.txt)
+          \`\`\`
+          EOF
+          # Remove older preview versions, then replace the previous build of this one (the tag moves to this commit)
+          for t in $OLD_RELEASE_TAGS; do gh release delete "$t" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true; done
+          gh release delete "$RELEASE_TAG" --cleanup-tag --yes --repo "$GITHUB_REPOSITORY" || true
+          gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" --prerelease --latest=false \
+            --title "PZ Memory Tool $PRODUCT_VERSION – Linux / SteamOS (build ${{ github.run_number }})" \
+            --notes-file notes.md \
+            "PZMemoryTool-$PRODUCT_VERSION-linux-steamos.tar.gz" PZMemoryTool-linux-steamos SHA256.txt
