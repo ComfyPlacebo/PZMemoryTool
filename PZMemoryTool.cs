@@ -2544,7 +2544,9 @@ namespace PZMemoryTool
             bool steamOk = SteamLaunchOptions.ConfigFiles().Count > 0;
             chkJson.Checked = true;
             chkBat.Checked = st.BatExists;
-            chkSteam.Checked = steamOk;
+            // Off by default (the game file and Alternate Launch are enough); stays ticked only when
+            // ZombieBuddy is already in Steam's launch options, so Install doesn't remove it from there.
+            chkSteam.Checked = steamOk && st.InSteam;
             chkSteam.Enabled = steamOk;
             if (!steamOk) lblSteamDesc.Text = "Not available: your Steam account's settings weren't found.";
             string cur = st.JsonArg + " " + st.SteamOpts;

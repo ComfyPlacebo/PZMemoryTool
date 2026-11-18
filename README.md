@@ -79,8 +79,9 @@ ZombieBuddy's own Windows installer does:
    page in Steam. The window notices by itself when Steam has downloaded it (stable, or beta if you're
    subscribed to that one; with both, you choose).
 2. **Choose where to switch it on.**
-   - Windows: **Game file** (normal launch), **Alternate Launch** (`ProjectZomboid64.bat`) and **Steam
-     launch options**, all ticked. For Steam, the tool closes Steam, makes the change and opens Steam again.
+   - Windows: **Game file** (normal launch) and **Alternate Launch** (`ProjectZomboid64.bat`), ticked;
+     **Steam launch options**, not ticked (tick it if you want it there too: the tool then closes Steam,
+     makes the change and opens Steam again).
    - Linux / SteamOS: the game file only. Linux reads `ProjectZomboid64.json` on every start, so Steam's
      launch options aren't needed and Steam is never closed.
 3. **Advanced** (click it to open): approval policy (*ask me for each new mod*, the default, or *only load
